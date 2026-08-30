@@ -24,13 +24,99 @@ def web_dir() -> str:
     )
 
 
+def smoke() -> int:
+    """Prove a packaged build actually works, without a desktop.
+
+    A CI job that only checks the artifact exists cannot catch a missing
+    hidden import, a web asset that did not get bundled, or a platform
+    backend that fails to load once frozen -- which are exactly the ways
+    PyInstaller builds break. This runs inside the frozen app and exercises
+    each of them. Only the window itself needs a real machine.
+    """
+    import importlib.metadata as md
+
+    checks, failed = [], False
+    index = os.path.join(web_dir(), "index.html")
+    for name, probe in (
+        ("bundled UI", lambda: index if os.path.exists(index) else _missing(index)),
+        ("pywebview", lambda: "pywebview " + md.version("pywebview")),
+        ("webview backend", _probe_backend),
+        ("zeroconf", _probe_zeroconf),
+        ("monitors", _probe_monitors),
+        ("pynput", _probe_pynput),
+    ):
+        try:
+            checks.append(f"PASS  {name}: {probe()}")
+        except Exception as exc:  # noqa: BLE001
+            checks.append(f"FAIL  {name}: {type(exc).__name__}: {exc}")
+            failed = True
+    print(f"platform={sys.platform} frozen={getattr(sys, 'frozen', False)}")
+    print("\n".join(checks))
+    print("SMOKE FAILED" if failed else "SMOKE OK")
+    return 1 if failed else 0
+
+
+def _missing(path: str):
+    raise FileNotFoundError(path)
+
+
+def _probe_backend() -> str:
+    """Import this platform's webview backend directly.
+
+    That import is what fails when PyInstaller misses the platform module,
+    and unlike `guilib.initialize()` it needs no display and no guessing at
+    an internal API.
+    """
+    import importlib
+
+    name = {
+        "win32": "webview.platforms.edgechromium",
+        "darwin": "webview.platforms.cocoa",
+    }.get(sys.platform)
+    if name is None:
+        return f"no backend expected on {sys.platform}"
+    importlib.import_module(name)
+    return name
+
+
+def _probe_zeroconf() -> str:
+    from zeroconf import Zeroconf
+
+    zc = Zeroconf()
+    zc.close()
+    return "started and closed"
+
+
+def _probe_monitors() -> str:
+    from . import config, monitors
+
+    found = monitors.enumerate_local(config.load(config.DEFAULT_PATH).device_id)
+    return ", ".join(f"{m.w}x{m.h}+{m.x}+{m.y}" for m in found)
+
+
+def _probe_pynput() -> str:
+    from pynput import keyboard, mouse
+
+    # A CI runner has no input session, so a denial here is expected and is
+    # not what this probe is for -- it is checking that the platform
+    # backends were bundled and import.
+    return f"{mouse.Listener.__module__}, {keyboard.Listener.__module__}"
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(prog="mouseshare", description=(
         "Share one keyboard and mouse between this machine and another."
     ))
     parser.add_argument("--version", action="version", version=__version__)
     parser.add_argument("--debug", action="store_true", help="verbose logging")
+    parser.add_argument(
+        "--smoke", action="store_true",
+        help="check the install without opening a window, then exit",
+    )
     args = parser.parse_args()
+
+    if args.smoke:
+        return smoke()
 
     logging.basicConfig(
         level=logging.DEBUG if args.debug else logging.INFO,

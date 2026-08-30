@@ -1,5 +1,9 @@
 # PyInstaller spec: windowed app for macOS and Windows.
 # Build with:  pyinstaller packaging/mouseshare.spec
+#
+# Windows gets a one-file .exe. macOS gets a onedir .app bundle: PyInstaller
+# warns that onefile inside a .app "clashes with macOS's security" and will
+# be an error in v7, and a bundle is a directory anyway.
 import os
 import sys
 
@@ -23,22 +27,24 @@ a = Analysis(
     excludes=["tkinter"],
 )
 pyz = PYZ(a.pure, a.zipped_data)
-exe = EXE(
-    pyz,
-    a.scripts,
-    a.binaries,
-    a.zipfiles,
-    a.datas,
-    name="MouseShare" if sys.platform == "darwin" else "mouseshare",
-    debug=False,
-    strip=False,
-    upx=False,
-    console=False,  # it has a window of its own now
-)
 
 if sys.platform == "darwin":
+    exe = EXE(
+        pyz,
+        a.scripts,
+        exclude_binaries=True,
+        name="MouseShare",
+        debug=False,
+        strip=False,
+        upx=False,
+        console=False,
+    )
+    coll = COLLECT(
+        exe, a.binaries, a.zipfiles, a.datas,
+        strip=False, upx=False, name="MouseShare",
+    )
     app = BUNDLE(
-        exe,
+        coll,
         name="MouseShare.app",
         # Stable, because macOS ties Accessibility and Input Monitoring
         # approval to the bundle identity. Changing it means re-approving.
@@ -55,4 +61,17 @@ if sys.platform == "darwin":
                 "MouseShare finds your other computer on the local network.",
             "NSBonjourServices": ["_mouseshare._tcp"],
         },
+    )
+else:
+    exe = EXE(
+        pyz,
+        a.scripts,
+        a.binaries,
+        a.zipfiles,
+        a.datas,
+        name="mouseshare",
+        debug=False,
+        strip=False,
+        upx=False,
+        console=False,  # it has a window of its own now
     )

@@ -29,10 +29,10 @@ jobs:
         include:
           - os: macos-latest
             artifact: MouseShare-macos
-            check: test -d dist/MouseShare.app
+            smoke: ./dist/MouseShare.app/Contents/MacOS/MouseShare --smoke
           - os: windows-latest
             artifact: MouseShare-windows
-            check: test -f dist/mouseshare.exe
+            smoke: ./dist/mouseshare.exe --smoke
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
@@ -41,9 +41,12 @@ jobs:
           python-version: "3.12"
       - run: pip install . pyinstaller
       - run: pyinstaller packaging/mouseshare.spec
-      - name: Check the expected artifact exists
+      # Run the frozen app, not just check a path exists. This is what
+      # catches a missing hidden import, an unbundled web asset, or a
+      # platform backend that only fails once packaged.
+      - name: Smoke-test the frozen app
         shell: bash
-        run: ${{ matrix.check }}
+        run: ${{ matrix.smoke }}
       - name: Ad-hoc sign so TCC identity is stable across rebuilds
         if: matrix.os == 'macos-latest'
         run: codesign --force --deep --sign - dist/MouseShare.app
