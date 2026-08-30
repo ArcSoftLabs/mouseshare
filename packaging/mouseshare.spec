@@ -5,8 +5,8 @@ import os
 block_cipher = None
 
 a = Analysis(
-    [os.path.join("packaging", "entry.py")],
-    pathex=[os.getcwd()],
+    [os.path.join(SPECPATH, "entry.py")],
+    pathex=[os.path.join(SPECPATH, "..")],
     binaries=[],
     datas=[],
     hiddenimports=[
