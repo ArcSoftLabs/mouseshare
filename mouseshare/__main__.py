@@ -33,13 +33,13 @@ def smoke() -> int:
     PyInstaller builds break. This runs inside the frozen app and exercises
     each of them. Only the window itself needs a real machine.
     """
-    import importlib.metadata as md
-
     checks, failed = [], False
     index = os.path.join(web_dir(), "index.html")
     for name, probe in (
         ("bundled UI", lambda: index if os.path.exists(index) else _missing(index)),
-        ("pywebview", lambda: "pywebview " + md.version("pywebview")),
+        # No `importlib.metadata` version check: a frozen app ships modules
+        # without package metadata, so asking for a version there fails on
+        # a perfectly good build. Importing the backend is the real test.
         ("webview backend", _probe_backend),
         ("zeroconf", _probe_zeroconf),
         ("monitors", _probe_monitors),
