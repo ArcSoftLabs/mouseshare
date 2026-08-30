@@ -64,6 +64,24 @@ def load(path: Path = DEFAULT_PATH) -> Config:
     return cfg
 
 
+def load_or_create(path: Path = DEFAULT_PATH) -> Config:
+    """Load, and write the result straight back.
+
+    A fresh install and a corrupt file both mint a new `device_id`. That id
+    keys every stored token and is baked into the pairing transcript, so if
+    it is not persisted immediately it changes on the next launch and
+    silently breaks every pairing the user had made.
+    """
+    cfg = load(path)
+    try:
+        save(cfg, path)
+    except OSError as exc:  # read-only home, full disk -- run anyway
+        import logging
+
+        logging.getLogger("mouseshare").warning("could not write config: %s", exc)
+    return cfg
+
+
 def save(cfg: Config, path: Path = DEFAULT_PATH) -> None:
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)

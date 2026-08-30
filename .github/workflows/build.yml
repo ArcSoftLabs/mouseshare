@@ -47,10 +47,16 @@ jobs:
       - name: Ad-hoc sign so TCC identity is stable across rebuilds
         if: matrix.os == 'macos-latest'
         run: codesign --force --deep --sign - dist/MouseShare.app
+      # Zip the bundle on macOS itself. Artifact upload normalises Unix
+      # modes, so a raw .app arrives with its executable bit stripped and
+      # the published build refuses to launch.
+      - name: Archive the app bundle on the runner
+        if: matrix.os == 'macos-latest'
+        run: ditto -c -k --keepParent dist/MouseShare.app dist/MouseShare-macos.zip
       - uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.artifact }}
-          path: dist/
+          path: ${{ matrix.os == 'macos-latest' && 'dist/MouseShare-macos.zip' || 'dist/' }}
 
   release:
     if: startsWith(github.ref, 'refs/tags/v')
@@ -64,10 +70,11 @@ jobs:
           path: artifacts
       - run: |
           cd artifacts
-          zip -r MouseShare-macos.zip MouseShare-macos
+          # macOS is already a ditto archive with its modes intact; only
+          # Windows needs zipping here.
           zip -r MouseShare-windows.zip MouseShare-windows
       - uses: softprops/action-gh-release@v2
         with:
           files: |
-            artifacts/MouseShare-macos.zip
+            artifacts/MouseShare-macos/MouseShare-macos.zip
             artifacts/MouseShare-windows.zip

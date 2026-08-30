@@ -21,6 +21,10 @@ class StateOwner:
         self._deliver = deliver
         self._state = copy.deepcopy(initial)
         self._lock = threading.RLock()
+        # Delivery happens outside the state lock (calling into the webview
+        # while holding it invites a lock inversion), so it gets its own --
+        # otherwise two threads can be inside evaluate_js at once.
+        self._deliver_lock = threading.Lock()
         self._revision = 0
         self._ready = False
         self._last_delivered = -1
@@ -63,7 +67,8 @@ class StateOwner:
                 return  # a slower thread caught up; never rewind the UI
             self._last_delivered = snapshot["revision"]
         try:
-            self._deliver(snapshot)
+            with self._deliver_lock:
+                self._deliver(snapshot)
         except Exception as exc:  # noqa: BLE001
             # A closed window invalidates the JS target mid-push. That is
             # not a reason to take the session down with it.

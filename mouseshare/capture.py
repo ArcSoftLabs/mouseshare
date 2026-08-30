@@ -141,7 +141,12 @@ class InputCapture:
                 if not self.suppressing:
                     return True
                 if data.flags & MOUSE_INJECTED_MASK:
-                    return True  # our own warp, not the real mouse
+                    # Any synthetic event passes, not just ours. Windows
+                    # gives no reliable way to tell our warp from another
+                    # tool's, and swallowing all injected input would break
+                    # accessibility software outright. Physical input --
+                    # the thing the user is holding -- is still suppressed.
+                    return True
                 if msg == WM_MOUSEMOVE:
                     dx = data.pt.x - self._anchor[0]
                     dy = data.pt.y - self._anchor[1]

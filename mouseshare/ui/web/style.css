@@ -295,5 +295,10 @@ input[type="text"]:focus { border-color: var(--accent); }
   100% { box-shadow: 0 0 0 0 rgba(91, 140, 255, 0); }
 }
 
-.perm { display: flex; align-items: center; gap: 9px; padding: 7px 0; }
+.perm { display: flex; align-items: center; gap: 10px; padding: 9px 0;
+        border-bottom: 1px solid var(--line); }
+.perm:last-child { border-bottom: 0; }
+.perm .meta { flex: 1; }
+.perm .meta strong { display: block; font-size: 13px; font-weight: 600; }
+.perm .meta span { color: var(--muted); font-size: 12px; }
 .perm .dot.bad { background: var(--warn); }

@@ -172,23 +172,38 @@ function startDrag(ev, block, device, scale) {
     dragging.block.style.top = dragging.originTop + (e.clientY - dragging.startY) + 'px';
   };
 
-  const up = async (e) => {
+  const finish = async (e) => {
     block.removeEventListener('pointermove', move);
-    block.removeEventListener('pointerup', up);
+    block.removeEventListener('pointerup', finish);
+    block.removeEventListener('pointercancel', abort);
+    block.removeEventListener('lostpointercapture', abort);
     block.classList.remove('dragging');
+    if (!dragging) return;
     const dx = Math.round((e.clientX - dragging.startX) / scale);
     const dy = Math.round((e.clientY - dragging.startY) / scale);
     const [ox, oy] = device.offset;
-    const other = (state.layout.devices.find((d) => d.device_id !== device.device_id) || {});
     dragging = null;
-    await api().set_offset(device.device_id, ox + dx, oy + dy);
-    // Snapping is the server's decision, so the UI cannot drift from the
-    // geometry the cursor actually crosses.
-    if (other.device_id) render(await api().snap(device.device_id, other.device_id));
+    // One call: Python snaps, validates and persists together, so the
+    // picture can never disagree with the geometry the cursor crosses.
+    render(await api().set_offset(device.device_id, ox + dx, oy + dy));
+  };
+
+  // A cancelled or lost pointer must clear the drag too, or renderLayout
+  // refuses to draw anything ever again.
+  const abort = () => {
+    block.removeEventListener('pointermove', move);
+    block.removeEventListener('pointerup', finish);
+    block.removeEventListener('pointercancel', abort);
+    block.removeEventListener('lostpointercapture', abort);
+    block.classList.remove('dragging');
+    dragging = null;
+    renderLayout();
   };
 
   block.addEventListener('pointermove', move);
-  block.addEventListener('pointerup', up);
+  block.addEventListener('pointerup', finish);
+  block.addEventListener('pointercancel', abort);
+  block.addEventListener('lostpointercapture', abort);
 }
 
 /* -- settings --------------------------------------------------------- */
@@ -217,17 +232,30 @@ async function refreshPermissions() {
   const panel = $('#permissions-panel');
   panel.hidden = !perms.needed;
   if (!perms.needed) return;
+
   const host = $('#permissions');
   host.innerHTML = '';
-  const row = el('div', 'perm');
-  row.appendChild(el('span', 'dot ' + (perms.trusted ? 'on' : 'bad')));
-  row.appendChild(document.createTextNode(
-    perms.trusted
-      ? 'Accessibility and Input Monitoring granted.'
-      : 'Grant Accessibility and Input Monitoring in System Settings → Privacy & Security.'
-  ));
-  host.appendChild(row);
+  for (const item of perms.items) {
+    const row = el('div', 'perm');
+    row.appendChild(el('span', 'dot ' + (item.granted ? 'on' : 'bad')));
+    const text = el('div', 'meta');
+    text.appendChild(el('strong', '', item.label));
+    text.appendChild(el('span', '', item.granted ? 'Granted' : item.why));
+    row.appendChild(text);
+    if (!item.granted) {
+      const open = el('button', 'ghost', 'Open Settings');
+      open.onclick = () => api().open_permissions(item.key);
+      row.appendChild(open);
+    }
+    host.appendChild(row);
+  }
 }
+
+// Granting a permission happens outside this window, so the panel has to
+// re-check while the user is looking at it rather than only at startup.
+setInterval(() => {
+  if (state && state.screen === 'settings') refreshPermissions();
+}, 2000);
 
 /* -- wiring ----------------------------------------------------------- */
 

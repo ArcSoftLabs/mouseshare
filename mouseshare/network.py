@@ -23,6 +23,10 @@ class _Link:
         self.sock = sock
         self._on_disconnect = on_disconnect
         self._lock = threading.Lock()
+        # sendall() can take several syscalls, and the mouse and keyboard
+        # listeners forward from separate threads. Without this two frames
+        # interleave and the peer drops a stream mid-session.
+        self._send_lock = threading.Lock()
         self._closed = False
 
     def close(self, reason: str) -> bool:
@@ -138,9 +142,21 @@ class MessageServer:
         if link is None or link.closed:
             return
         try:
-            link.sock.sendall(protocol.encode(msg))
+            with link._send_lock:
+                link.sock.sendall(protocol.encode(msg))
         except OSError:
             link.close("error")
+
+    def disconnect(self, reason: str = "closed") -> None:
+        """Drop the current peer but keep listening.
+
+        Refusing a peer is not a reason to stop being reachable; the user
+        may well want to pair with it properly a moment later.
+        """
+        with self._lock:
+            link = self._link
+        if link is not None:
+            link.close(reason)
 
     def stop(self) -> None:
         self._running = False
@@ -185,7 +201,8 @@ class MessageClient:
         if self._link is None or self._link.closed:
             return
         try:
-            self._link.sock.sendall(protocol.encode(msg))
+            with self._link._send_lock:
+                self._link.sock.sendall(protocol.encode(msg))
         except OSError:
             self._link.close("error")
 

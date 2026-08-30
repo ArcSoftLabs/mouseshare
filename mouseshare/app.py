@@ -20,6 +20,7 @@ from .capture import InputCapture
 from .inject import Injector
 from .layout import Layout
 from .network import MessageClient, MessageServer
+from . import session
 from .session import ClientSession, HostSession
 from .state import StateOwner
 
@@ -28,7 +29,7 @@ log = logging.getLogger("mouseshare")
 
 class App:
     def __init__(self, deliver, cfg_path=config.DEFAULT_PATH):
-        self.cfg = config.load(cfg_path)
+        self.cfg = config.load_or_create(cfg_path)
         self._cfg_path = cfg_path
         self._lock = threading.RLock()
 
@@ -47,6 +48,8 @@ class App:
         self._peer_monitors = []
         self._nonce = ""
         self._role = ""
+        self._phase = "idle"
+        self._tearing_down = False
         self._host: Optional[HostSession] = None
         self._client_session: Optional[ClientSession] = None
         self._capture: Optional[InputCapture] = None
@@ -184,6 +187,7 @@ class App:
             code.encode("ascii"), self._nonce, self.cfg.device_id, self._peer_id
         )
         self._send(protocol.pair_proof(mac))
+        self._phase = "proved"
         return self.state.snapshot()
 
     def cancel(self) -> dict:
@@ -191,19 +195,43 @@ class App:
         return self.state.snapshot()
 
     def set_offset(self, device_id: str, x: int, y: int) -> dict:
-        self.cfg.offsets[device_id] = (int(x), int(y))
-        config.save(self.cfg, self._cfg_path)
-        if self._host is not None:
-            self._host.layout.set_offset(device_id, (int(x), int(y)))
-        self.state.set(layout=self._layout_view(self._build_layout()))
-        return self.state.snapshot()
+        """Drop a device at a position: snap it flush, check it does not
+        overlap, and only then keep it.
 
-    def snap(self, device_id: str, anchor_id: str) -> dict:
+        One call, not a set-then-snap pair. Overlapping screens make cursor
+        ownership ambiguous, so a half-applied drop would route input to the
+        wrong machine until the second call landed -- or forever, if it
+        never did.
+        """
         layout = self._build_layout()
         if layout is None:
+            self.cfg.offsets[device_id] = (int(x), int(y))
+            config.save(self.cfg, self._cfg_path)
+            self.state.set(layout=self._layout_view(None))
             return self.state.snapshot()
-        layout.snap_device(device_id, anchor_id)
-        return self.set_offset(device_id, *layout.offsets[device_id])
+
+        previous = self.cfg.offsets.get(device_id, (0, 0))
+        layout.set_offset(device_id, (int(x), int(y)))
+        anchor = next(
+            (d for d in layout.device_ids() if d != device_id), None
+        )
+        if anchor is not None:
+            layout.snap_device(device_id, anchor)
+        placed = layout.offsets[device_id]
+        if not layout.can_place(device_id, placed):
+            layout.set_offset(device_id, previous)
+            self.state.set(
+                error="Those screens would overlap, so the move was undone.",
+                layout=self._layout_view(layout),
+            )
+            return self.state.snapshot()
+
+        self.cfg.offsets[device_id] = placed
+        config.save(self.cfg, self._cfg_path)
+        if self._host is not None:
+            self._host.layout.set_offset(device_id, placed)
+        self.state.set(error="", layout=self._layout_view(layout))
+        return self.state.snapshot()
 
     def rename(self, name: str) -> dict:
         self.cfg.name = name.strip() or self.cfg.name
@@ -221,19 +249,76 @@ class App:
         return self.state.snapshot()
 
     def permissions(self) -> dict:
-        """macOS gates input capture behind Accessibility. Report it rather
-        than letting the app look silently broken."""
+        """macOS gates input behind two separate switches.
+
+        They are granted independently and mean different things --
+        Accessibility lets us inject, Input Monitoring lets us read -- so
+        reporting one number would tell the user the app is broken without
+        telling them which switch to flip.
+        """
         import sys
 
         if sys.platform != "darwin":
-            return {"platform": sys.platform, "needed": False, "trusted": True}
-        try:
-            from ApplicationServices import AXIsProcessTrusted
+            return {"needed": False, "items": []}
 
-            trusted = bool(AXIsProcessTrusted())
-        except Exception:  # noqa: BLE001
-            trusted = False
-        return {"platform": "darwin", "needed": True, "trusted": trusted}
+        def accessibility() -> bool:
+            try:
+                from ApplicationServices import AXIsProcessTrusted
+
+                return bool(AXIsProcessTrusted())
+            except Exception:  # noqa: BLE001
+                return False
+
+        def input_monitoring() -> bool:
+            try:
+                import Quartz
+
+                return bool(Quartz.CGPreflightListenEventAccess())
+            except Exception:  # noqa: BLE001
+                # Older pyobjc has no preflight call. Claiming "denied"
+                # would nag forever, so treat unknown as granted and let
+                # the real failure speak for itself.
+                return True
+
+        return {
+            "needed": True,
+            "items": [
+                {
+                    "key": "accessibility",
+                    "label": "Accessibility",
+                    "why": "lets MouseShare move the cursor and type here",
+                    "granted": accessibility(),
+                },
+                {
+                    "key": "input",
+                    "label": "Input Monitoring",
+                    "why": "lets MouseShare read your keyboard and mouse",
+                    "granted": input_monitoring(),
+                },
+            ],
+        }
+
+    def open_permissions(self, key: str) -> bool:
+        """Open the System Settings pane for one permission."""
+        import subprocess
+        import sys
+
+        if sys.platform != "darwin":
+            return False
+        pane = {
+            "accessibility": "Privacy_Accessibility",
+            "input": "Privacy_ListenEvent",
+        }.get(key)
+        if pane is None:
+            return False
+        try:
+            subprocess.Popen(
+                ["open", f"x-apple.systempreferences:com.apple.preference.security?{pane}"]
+            )
+            return True
+        except OSError as exc:
+            log.warning("could not open System Settings: %s", exc)
+            return False
 
     # -- discovery -----------------------------------------------------------
 
@@ -284,6 +369,7 @@ class App:
         self._client = client
         self._peer_id = peer_id
         self._role = "host"
+        self._phase = "offered"
         client.start_reader(self._on_message, self._on_disconnect)
         client.send(protocol.pair_request(self.cfg.device_id, self.cfg.name))
         self.state.set(
@@ -298,14 +384,59 @@ class App:
         if link is not None:
             link.send(msg)
 
+    def _send_to_server(self, msg: dict) -> None:
+        """Answer the inbound link specifically, whatever role we hold."""
+        if self._server is not None:
+            self._server.send(msg)
+
+    def _drop_outbound(self) -> None:
+        """Give up our own outbound attempt, keeping the inbound one."""
+        if self._client is not None:
+            self._client.close()
+            self._client = None
+        self._role = ""
+        self._phase = "idle"
+        self._nonce = ""
+
     # -- protocol ------------------------------------------------------------
 
+    # Which messages are legal in which handshake phase. Anything else is
+    # a peer that is confused or lying, and either way the link goes.
+    #
+    #   idle       -> a fresh inbound link, nothing agreed yet
+    #   challenged -> we asked for a code and are waiting to be proved to
+    #   offered    -> we connected out and are waiting for the challenge
+    #   proved     -> we answered the challenge, waiting to be let in
+    #   session    -> authenticated; input may flow
+    _ALLOWED = {
+        "idle": {"pair_request"},
+        "challenged": {"pair_proof", "auth"},
+        "offered": {"pair_challenge", "pair_err"},
+        "proved": {"pair_ok", "pair_err"},
+        "session": {"layout", "enter", "pos", "click", "scroll", "key", "leave"},
+    }
+
     def _on_message(self, msg: dict) -> None:
+        t = msg.get("t")
+        if t not in self._ALLOWED.get(self._phase, set()):
+            # Without this, an unsolicited pair_ok would start a session on
+            # a socket that never proved anything, and the whole handshake
+            # would be decoration.
+            log.warning("unexpected %r in phase %r; dropping link", t, self._phase)
+            self._teardown("unexpected message")
+            return
         try:
             self._dispatch(msg)
-        except Exception as exc:  # noqa: BLE001
-            log.exception("message handling failed")
+        except pairing.PairingFailed as exc:
             self.state.set(error=str(exc))
+            self._teardown(str(exc))
+        except Exception as exc:  # noqa: BLE001
+            # A message we cannot make sense of means the stream is no
+            # longer trustworthy. Staying connected around it is how input
+            # gets left suppressed or held down.
+            log.exception("message handling failed")
+            self.state.set(error=f"Connection dropped: {exc}")
+            self._teardown("bad message")
 
     def _dispatch(self, msg: dict) -> None:
         t = msg.get("t")
@@ -320,18 +451,41 @@ class App:
         elif t == "pair_ok":
             self._on_pair_ok(msg)
         elif t == "pair_err":
-            self.state.set(error=msg.get("reason", "Pairing failed."), pairing=None)
+            self._on_pair_err(msg)
         elif t == "layout":
             self._peer_monitors = monitors.from_wire(self._peer_id, msg["monitors"])
             self.state.set(layout=self._layout_view(self._build_layout()))
         elif self._client_session is not None:
             self._client_session.on_message(msg)
 
+    def _on_pair_err(self, msg: dict) -> None:
+        reason = msg.get("reason", "Pairing failed.")
+        if reason == "wrong code":
+            # Retryable: keep the link and the code entry on screen so the
+            # user can simply type it again.
+            self.state.set(error="That code was not right. Try again.")
+            return
+        self.state.set(error=reason)
+        self._teardown(reason)
+
     def _begin_target_pairing(self, msg: dict) -> None:
         """We were connected to, so we are the client: show the code."""
-        self._peer_id = msg["device_id"]
+        incoming = msg["device_id"]
+        if self._phase in ("offered", "proved") and self._client is not None:
+            # Both machines pressed Connect. Each side runs the same
+            # comparison and reaches the same answer, before either starts
+            # suppressing input.
+            if session.pick_winner(self.cfg.device_id, incoming) == self.cfg.device_id:
+                log.info("simultaneous connect: keeping our outbound link")
+                self._send_to_server(protocol.pair_err("busy"))
+                return
+            log.info("simultaneous connect: yielding to %s", incoming)
+            self._drop_outbound()
+
+        self._peer_id = incoming
         self._peer_name = msg.get("name", "")
         self._role = "client"
+        self._phase = "challenged"
         saved = self.cfg.peers.get(self._peer_id)
         self._nonce = pairing.make_nonce()
         if saved and saved.token:
@@ -350,27 +504,29 @@ class App:
             },
         )
         self._send(protocol.pair_challenge(self._nonce, self.cfg.device_id))
-        threading.Thread(target=self._tick_code, daemon=True).start()
+        threading.Thread(
+            target=self._tick_code, args=(self._pending,), daemon=True
+        ).start()
 
-    def _tick_code(self) -> None:
-        # The reader thread clears _pending the moment the code is accepted,
-        # so every iteration works from one snapshot of it rather than
-        # re-reading the attribute between the test and the use.
-        while True:
-            pending = self._pending
-            if pending is None or pending.remaining() <= 0:
-                break
+    def _tick_code(self, mine) -> None:
+        """Count down one specific pairing.
+
+        The worker holds the pending object it was started for and checks
+        identity every time. Following the shared attribute instead would
+        let an obsolete timer adopt a newer pairing and tear down a session
+        that had nothing to do with it.
+        """
+        while self._pending is mine and mine.remaining() > 0:
             time.sleep(1.0)
+            if self._pending is not mine:
+                return
             snapshot = self.state.snapshot().get("pairing")
             if not snapshot or snapshot.get("role") != "target":
                 return
-            pending = self._pending
-            if pending is None:
-                return
             self.state.set(pairing={
-                **snapshot, "remaining": int(pending.remaining())
+                **snapshot, "remaining": int(mine.remaining())
             })
-        if self._pending is not None:
+        if self._pending is mine:
             self._teardown("code expired")
 
     def _on_challenge(self, msg: dict) -> None:
@@ -387,6 +543,7 @@ class App:
                 self.cfg.device_id, self._peer_id,
             )
             self._send(protocol.auth(self.cfg.device_id, mac))
+            self._phase = "proved"
             return
         self.state.set(pairing={
             "role": "connector", "code": "", "remaining": 0, "peer": self._peer_id
@@ -494,6 +651,7 @@ class App:
         return {"devices": blocks}
 
     def _become_host(self) -> None:
+        self._phase = "session"
         layout = self._build_layout()
         self._injector = Injector.create()
         self._host = HostSession(
@@ -527,6 +685,7 @@ class App:
         self._publish_peers()
 
     def _become_client(self) -> None:
+        self._phase = "session"
         self._injector = Injector.create()
         self._client_session = ClientSession(self._injector)
         self.state.set(
@@ -549,6 +708,9 @@ class App:
     def _teardown(self, reason: str) -> None:
         """Input first, always."""
         with self._lock:
+            if self._tearing_down:
+                return  # closing a link re-enters here; do it once
+            self._tearing_down = True
             if self._host is not None:
                 self._host.on_disconnect(reason)
             if self._client_session is not None:
@@ -557,12 +719,18 @@ class App:
                 self._capture.stop()
             if self._client is not None:
                 self._client.close()
+            if self._server is not None:
+                # The inbound link is the one an unwelcome peer arrives on,
+                # so refusing it has to actually hang up.
+                self._server.disconnect(reason)
             self._host = self._client_session = self._capture = None
             self._client = self._injector = None
             self._role = ""
+            self._phase = "idle"
             self._pending = None
             self._nonce = ""
             self._peer_monitors = []
+            self._tearing_down = False
         self.state.set(
             session=None,
             pairing=None,

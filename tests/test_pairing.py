@@ -85,12 +85,13 @@ def test_pending_pairing_accepts_the_right_proof():
     assert pending.check(mac) is True
 
 
-def test_pending_pairing_rejects_after_three_wrong_attempts():
+def test_the_third_wrong_code_ends_the_pairing():
+    """Three attempts means the third failure is terminal, not the fourth."""
     clock = FakeClock()
     pending = pairing.PendingPairing(local_id=B, peer_id=A, clock=clock)
     bad = pairing.proof(b"000000", pending.nonce, A, B)
-    for _ in range(3):
-        assert pending.check(bad) is False
+    assert pending.check(bad) is False
+    assert pending.check(bad) is False
     with pytest.raises(pairing.PairingFailed, match="attempts"):
         pending.check(bad)
 

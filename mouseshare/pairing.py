@@ -87,4 +87,8 @@ class PendingPairing:
         if verify(self.code.encode("ascii"), mac, self.nonce, self._peer_id, self._local_id):
             return True
         self._attempts += 1
+        if self._attempts >= MAX_ATTEMPTS:
+            # The third wrong code is the third attempt, not a free one
+            # before the limit takes effect.
+            raise PairingFailed("too many attempts")
         return False

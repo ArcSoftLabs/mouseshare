@@ -9,9 +9,13 @@ and the user cannot type their way out of it.
 Platform work lives behind `PynputBackend` so the registry -- the part
 that matters for safety -- is testable without a display.
 """
+import logging
+import threading
 from typing import Set, Tuple
 
 Held = Tuple[str, str, str]
+
+log = logging.getLogger("mouseshare")
 
 
 class PynputBackend:
@@ -53,13 +57,17 @@ class Injector:
     def __init__(self, backend):
         self._backend = backend
         self._held: Set[Held] = set()
+        # The reader thread injects while a disconnect drains. Without this
+        # the drain can iterate a set that is still being added to.
+        self._lock = threading.Lock()
 
     @classmethod
     def create(cls) -> "Injector":
         return cls(PynputBackend())
 
     def held(self) -> Set[Held]:
-        return set(self._held)
+        with self._lock:
+            return set(self._held)
 
     def move_to(self, x: int, y: int) -> None:
         self._backend.move_to(x, y)
@@ -78,16 +86,27 @@ class Injector:
         self._track(("key", kind, value), pressed)
 
     def _track(self, item: Held, pressed: bool) -> None:
-        if pressed:
-            self._held.add(item)  # a set, so autorepeat holds it once
-        else:
-            self._held.discard(item)
+        with self._lock:
+            if pressed:
+                self._held.add(item)  # a set, so autorepeat holds it once
+            else:
+                self._held.discard(item)
 
     def release_all(self) -> None:
-        """Let go of everything. Safe to call at any time, including twice."""
-        for kind, sub, value in sorted(self._held):
-            if kind == "button":
-                self._backend.button(value, False)
-            else:
-                self._backend.key(sub, value, False)
-        self._held.clear()
+        """Let go of everything. Safe to call at any time, including twice.
+
+        Every item is released independently and the registry is cleared
+        whatever happens. This is the last line of defence against a stuck
+        modifier: giving up on the first failure would leave every
+        remaining key down, and the user cannot type their way out of that.
+        """
+        with self._lock:
+            pending, self._held = sorted(self._held), set()
+        for kind, sub, value in pending:
+            try:
+                if kind == "button":
+                    self._backend.button(value, False)
+                else:
+                    self._backend.key(sub, value, False)
+            except Exception as exc:  # noqa: BLE001
+                log.warning("could not release %s %r: %s", kind, value, exc)
