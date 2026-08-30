@@ -391,24 +391,36 @@ coordinate round-trip; packaged app launches from its install location.
 `mouseshare/ui/web/` ships as `datas`, resolved via `sys._MEIPASS` when
 frozen.
 
-### Stack gate
+### Stack gate — settled
 
-The pywebview choice is **provisional until a spike proves it**. The spike
-is a packaged skeleton, not a hello-world window — a hello-world window
-validates none of the risk. It must, as a packaged artifact on both
-platforms:
+The pywebview choice was provisional, to be decided by evidence rather
+than argument. The evidence came in on 2026-08-30 and it holds:
 
-1. Load a bundled HTML asset from `_MEIPASS`.
-2. Complete one JS→Python→JS `js_api` round-trip.
-3. Push one state update from a background thread to the UI.
-4. Start and stop a zeroconf advertiser and browser.
-5. Start pynput mouse **and** keyboard listeners alongside the webview.
-6. Build `console=False`, as a real `.app` on macOS.
-7. Launch on the owner's actual Mac and Windows machines.
+- The app runs on the real Windows machine: WebView2 opens the window,
+  loads the bundled UI, and completes the js_api round trip.
+- A packaged `.app` on a macOS CI runner resolved its bundled assets
+  through `_MEIPASS`, started and stopped zeroconf, enumerated monitors,
+  and started **both** pynput listeners.
+- The build passes on both platforms.
 
-CI build success proves packaging, not launch. If the spike fails, the
-stack flips to PySide6 and only the spike is lost — which is why it comes
-before the UI, not after.
+So the stack stays. The throwaway spike that answered this has been
+deleted; what it was good for now lives in the app itself as
+`mouseshare --smoke`, which CI runs *inside the frozen artifact* on both
+platforms. A build that is missing a hidden import or a web asset now
+fails rather than shipping — checking that an artifact file exists never
+could have caught either.
+
+Two things this turned up that no local test could:
+
+- Windows reserves port ranges for Hyper-V and WSL, so binding the default
+  port can fail outright with `WinError 10013`. The listener falls back to
+  any free port and advertises the one it actually bound.
+- PyInstaller warns that onefile inside a `.app` "clashes with macOS's
+  security" and will be an error in v7, so macOS builds onedir.
+
+Still unverified, and only a real Mac can close it: that the window opens
+on macOS, and the permission prompts behave. That is the release
+checklist's job.
 
 ## Non-goals
 

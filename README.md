@@ -80,6 +80,13 @@ pairing, layout, transport, session and state logic are all covered there.
 Input capture, injection and monitor enumeration are platform code and are
 verified by hand.
 
+To check an install without opening a window — CI runs this inside the
+packaged app on both platforms:
+
+```sh
+mouseshare --smoke
+```
+
 ### Release checklist
 
 Before tagging, on both real machines:
