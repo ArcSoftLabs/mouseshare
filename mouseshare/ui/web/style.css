@@ -124,6 +124,12 @@ header p, .empty p { color: var(--muted); margin: 0; }
   color: var(--bad); font-size: 13px;
 }
 
+.banner.info {
+  background: var(--surface);
+  border-color: var(--line);
+  color: var(--muted);
+}
+
 /* -- device cards ---------------------------------------------------- */
 
 .cards { display: grid; gap: 10px; }

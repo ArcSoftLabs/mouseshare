@@ -92,6 +92,19 @@ def code_of(target):
     return target.state.snapshot()["pairing"]["code"]
 
 
+def ready_to_type(connector):
+    """The connector can only prove a code once the challenge has arrived
+    with its nonce. The UI gates the code entry on exactly this, so the
+    tests wait for it too rather than racing the network."""
+    assert wait_for(lambda: connector._nonce), "no challenge received"
+
+
+def pair_up(connector, target):
+    code = code_of(target)
+    ready_to_type(connector)
+    connector.submit_code(code)
+
+
 def test_the_target_shows_a_six_digit_code_when_connected_to(pair):
     connector, target = pair
     connector.connect_manually("127.0.0.1", target._server.port)
@@ -102,7 +115,7 @@ def test_the_target_shows_a_six_digit_code_when_connected_to(pair):
 def test_the_right_code_pairs_both_machines(pair):
     connector, target = pair
     connector.connect_manually("127.0.0.1", target._server.port)
-    connector.submit_code(code_of(target))
+    pair_up(connector, target)
 
     assert wait_for(lambda: connector.state.snapshot().get("session"))
     assert connector.state.snapshot()["session"]["role"] == "host"
@@ -113,7 +126,7 @@ def test_the_right_code_pairs_both_machines(pair):
 def test_pairing_stores_the_same_token_on_both_machines(pair):
     connector, target = pair
     connector.connect_manually("127.0.0.1", target._server.port)
-    connector.submit_code(code_of(target))
+    pair_up(connector, target)
     assert wait_for(lambda: connector.cfg.peers)
     assert wait_for(lambda: target.cfg.peers)
 
@@ -126,6 +139,7 @@ def test_the_wrong_code_does_not_pair(pair):
     connector, target = pair
     connector.connect_manually("127.0.0.1", target._server.port)
     real = code_of(target)
+    ready_to_type(connector)
     wrong = "000000" if real != "000000" else "111111"
     connector.submit_code(wrong)
     time.sleep(0.5)
@@ -136,7 +150,7 @@ def test_the_wrong_code_does_not_pair(pair):
 def test_the_host_learns_the_peers_monitors(pair):
     connector, target = pair
     connector.connect_manually("127.0.0.1", target._server.port)
-    connector.submit_code(code_of(target))
+    pair_up(connector, target)
     # The session is the observable signal that pair_ok arrived; the
     # monitor list is set in the same handler.
     assert wait_for(lambda: connector.state.snapshot().get("session"))
@@ -147,7 +161,7 @@ def test_the_host_learns_the_peers_monitors(pair):
 def test_the_layout_shows_both_machines_after_pairing(pair):
     connector, target = pair
     connector.connect_manually("127.0.0.1", target._server.port)
-    connector.submit_code(code_of(target))
+    pair_up(connector, target)
     assert wait_for(
         lambda: len(connector.state.snapshot()["layout"]["devices"]) == 2
     )
@@ -156,7 +170,7 @@ def test_the_layout_shows_both_machines_after_pairing(pair):
 def test_a_disconnect_clears_the_session_on_both_sides(pair):
     connector, target = pair
     connector.connect_manually("127.0.0.1", target._server.port)
-    connector.submit_code(code_of(target))
+    pair_up(connector, target)
     assert wait_for(lambda: target.state.snapshot().get("session"))
 
     connector.cancel()
@@ -167,7 +181,7 @@ def test_a_second_pairing_skips_the_code_using_the_stored_token(pair):
     """The whole point of the token: type the code once, ever."""
     connector, target = pair
     connector.connect_manually("127.0.0.1", target._server.port)
-    connector.submit_code(code_of(target))
+    pair_up(connector, target)
     assert wait_for(lambda: connector.state.snapshot().get("session"))
     connector.cancel()
     assert wait_for(lambda: target.state.snapshot().get("session") is None)

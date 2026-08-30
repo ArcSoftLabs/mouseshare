@@ -38,6 +38,12 @@ function render(next) {
   banner.textContent = state.error || '';
   banner.hidden = !state.error;
 
+  // A notice is worth saying but is not something going wrong, so it must
+  // not look like a failure.
+  const notice = $('#notice');
+  notice.textContent = state.notice || '';
+  notice.hidden = !state.notice;
+
   $('#self-name').textContent = state.device.name;
   $('#self-port').textContent = 'port ' + state.device.port;
   if (document.activeElement !== $('#name-input')) {

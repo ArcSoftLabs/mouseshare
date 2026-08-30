@@ -59,8 +59,18 @@ def main() -> int:
         background_color="#0d0e12",
     )
 
+    def boot() -> None:
+        # pywebview swallows exceptions from this callback, which would
+        # leave a window rendering over a dead application. Anything that
+        # escapes start() is reported into the UI instead.
+        try:
+            app.start()
+        except Exception as exc:  # noqa: BLE001
+            logging.exception("startup failed")
+            app.state.set(error=f"MouseShare could not start: {exc}")
+
     try:
-        webview.start(lambda: app.start(), debug=args.debug)
+        webview.start(boot, debug=args.debug)
     finally:
         # Closing the window quits, so this is the one shutdown path, and
         # it must release input before anything else can go wrong.

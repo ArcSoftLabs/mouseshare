@@ -64,25 +64,67 @@ class App:
             "session": None,
             "layout": self._layout_view(None),
             "error": "",
+            # Something worth saying that is not something going wrong.
+            "notice": "",
         })
 
     # -- lifecycle -----------------------------------------------------------
 
     def start(self) -> None:
-        self._server = MessageServer(
-            "0.0.0.0", self.cfg.port, self._on_message, self._on_disconnect
-        )
-        self._server.start()
+        notice = self._listen()
+        if self._server is None:
+            self.state.set(error=notice, notice="")
+            return
+
+        # Advertise the port actually bound, not the one we asked for --
+        # they differ whenever the preferred port was unavailable.
         self._advertiser = discovery.Advertiser(
-            self.cfg.device_id, self.cfg.name, self.cfg.port
+            self.cfg.device_id, self.cfg.name, self._server.port
         )
         self._browser = discovery.Browser(self.cfg.device_id, self._on_peers)
         try:
             self._advertiser.start()
             self._browser.start()
         except OSError as exc:
-            self.state.set(error=f"Network discovery unavailable: {exc}")
+            notice = notice or f"Network discovery unavailable: {exc}"
+        self.state.set(
+            notice=notice,
+            device={
+                "id": self.cfg.device_id,
+                "name": self.cfg.name,
+                "port": self._server.port,
+            },
+        )
         self._publish_peers()
+
+    def _listen(self) -> str:
+        """Bind the listener, falling back to any free port.
+
+        Windows reserves blocks of ports for Hyper-V and WSL, and a machine
+        running either can refuse the default outright (WinError 10013).
+        Peers learn the real port from the mDNS advertisement, so falling
+        back costs nothing except a line in the UI for anyone who has to
+        type an address by hand.
+        """
+        for port, fallback in ((self.cfg.port, False), (0, True)):
+            try:
+                self._server = MessageServer(
+                    "0.0.0.0", port, self._on_message, self._on_disconnect
+                )
+            except OSError as exc:
+                if not fallback:
+                    log.warning("port %d unavailable (%s); trying any", port, exc)
+                    continue
+                log.error("could not open a listening port: %s", exc)
+                return f"Could not open a network port: {exc}"
+            self._server.start()
+            if fallback:
+                return (
+                    f"Port {self.cfg.port} was unavailable, so MouseShare is "
+                    f"listening on {self._server.port} instead."
+                )
+            return ""
+        return "Could not open a network port."
 
     def stop(self) -> None:
         """Order matters: input first, so a failure later cannot leave a
@@ -311,13 +353,22 @@ class App:
         threading.Thread(target=self._tick_code, daemon=True).start()
 
     def _tick_code(self) -> None:
-        while self._pending is not None and self._pending.remaining() > 0:
+        # The reader thread clears _pending the moment the code is accepted,
+        # so every iteration works from one snapshot of it rather than
+        # re-reading the attribute between the test and the use.
+        while True:
+            pending = self._pending
+            if pending is None or pending.remaining() <= 0:
+                break
             time.sleep(1.0)
             snapshot = self.state.snapshot().get("pairing")
             if not snapshot or snapshot.get("role") != "target":
                 return
+            pending = self._pending
+            if pending is None:
+                return
             self.state.set(pairing={
-                **snapshot, "remaining": int(self._pending.remaining())
+                **snapshot, "remaining": int(pending.remaining())
             })
         if self._pending is not None:
             self._teardown("code expired")
