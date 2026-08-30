@@ -159,6 +159,10 @@ class InputCapture:
         def handle_move(x, y, *_):
             if self.suppressing:
                 # macOS path: callbacks fire even for suppressed events.
+                # Untested as a host: if the tap stops the move reaching
+                # the window server the cursor never leaves the anchor,
+                # every callback carries anchor+delta, and measuring from
+                # `_last` would telescope movement to nothing.
                 self._moved(int(x), int(y))
             else:
                 self._on_move(int(x), int(y))
