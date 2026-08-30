@@ -59,7 +59,7 @@ class Injector:
         self._held: Set[Held] = set()
         # The reader thread injects while a disconnect drains. Without this
         # the drain can iterate a set that is still being added to.
-        self._lock = threading.Lock()
+        self._lock = threading.RLock()
 
     @classmethod
     def create(cls) -> "Injector":
@@ -76,21 +76,26 @@ class Injector:
         self._backend.scroll(dx, dy)
 
     def click(self, name: str, pressed: bool) -> None:
-        if not self._backend.button(name, pressed):
-            return  # unresolvable: never pressed, so never track it
-        self._track(("button", "", name), pressed)
+        # Press and record under one lock. Doing the backend call first
+        # leaves a window where release_all() drains, then the press is
+        # recorded afterwards and stays held forever.
+        with self._lock:
+            if not self._backend.button(name, pressed):
+                return  # unresolvable: never pressed, so never track it
+            self._track(("button", "", name), pressed)
 
     def key(self, kind: str, value: str, pressed: bool) -> None:
-        if not self._backend.key(kind, value, pressed):
-            return
-        self._track(("key", kind, value), pressed)
+        with self._lock:
+            if not self._backend.key(kind, value, pressed):
+                return
+            self._track(("key", kind, value), pressed)
 
     def _track(self, item: Held, pressed: bool) -> None:
-        with self._lock:
-            if pressed:
-                self._held.add(item)  # a set, so autorepeat holds it once
-            else:
-                self._held.discard(item)
+        # Caller holds the lock.
+        if pressed:
+            self._held.add(item)  # a set, so autorepeat holds it once
+        else:
+            self._held.discard(item)
 
     def release_all(self) -> None:
         """Let go of everything. Safe to call at any time, including twice.

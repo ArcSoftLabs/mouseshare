@@ -88,9 +88,10 @@ def test_input_messages_before_pairing_are_not_injected(victim):
     client.close()
 
 
-def test_a_malformed_input_message_drops_the_connection(victim):
-    """A message the handler cannot make sense of means the stream is no
-    longer trustworthy, and the session must not stay up around it."""
+def test_an_input_message_out_of_phase_drops_the_connection(victim):
+    """Named for what it actually exercises: the phase gate, which rejects
+    this before any handler sees it. A stream that is talking out of turn
+    cannot be trusted to say when to stop suppressing input."""
     client, _ = attacker(victim)
     client.send({"t": "key", "kind": "char"})  # no 'value', no 'pressed'
     assert wait_for(lambda: not victim._server.has_connection())
@@ -126,3 +127,95 @@ def test_a_corrupt_config_gets_a_new_identity_that_is_also_persisted(tmp_path):
     path.write_text("{ truncated")
     recovered = App(lambda s: None, cfg_path=path).cfg.device_id
     assert App(lambda s: None, cfg_path=path).cfg.device_id == recovered
+
+
+# -- one handshake per socket ------------------------------------------------
+
+
+def test_an_inbound_socket_cannot_hijack_an_outbound_handshake(tmp_path):
+    """The phase must belong to a socket, not to the app.
+
+    While this machine is dialling out and waiting to be let in, its phase
+    legitimately allows `pair_ok`. If that phase is global, an entirely
+    unauthenticated inbound socket can send one and take the session.
+    """
+    from mouseshare import config as cfgmod
+    from mouseshare import monitors, pairing, protocol
+    from mouseshare.network import MessageClient, MessageServer
+
+    peer_id = "peerpeerpeer"
+
+    # A peer that answers our call with a challenge and then goes quiet,
+    # parking us in `proved` -- the phase that legitimately accepts pair_ok.
+    holder = {}
+
+    def peer_logic(msg):
+        if msg.get("t") == "pair_request":
+            holder["server"].send(protocol.pair_challenge(pairing.make_nonce(), peer_id))
+
+    holder["server"] = MessageServer("127.0.0.1", 0, peer_logic)
+    holder["server"].start()
+
+    victim = App(lambda s: None, cfg_path=tmp_path / "victim.json")
+    victim.state.mark_ready()
+    # Already paired, so the challenge is answered automatically and we
+    # land in `proved` without a human typing anything.
+    victim.cfg.peers[peer_id] = cfgmod.Peer(name="Peer", token="cd" * 32)
+    victim._server = MessageServer(
+        "127.0.0.1", 0, victim._on_message, victim._on_disconnect
+    )
+    victim._server.start()
+    try:
+        victim.connect_manually("127.0.0.1", holder["server"].port)
+        assert wait_for(lambda: victim._phase == "proved"), "never reached proved"
+
+        from mouseshare.layout import Monitor
+
+        attacker_link = MessageClient("127.0.0.1", victim._server.port)
+        attacker_link.connect()
+        attacker_link.start_reader(lambda m: None)
+        # A well-formed pair_ok, so this cannot pass merely because the
+        # payload was malformed enough to crash the handler.
+        attacker_link.send(protocol.pair_ok(
+            "Attacker",
+            monitors.to_wire([Monitor("x", "0", 0, 0, 1920, 1080, primary=True)]),
+            token="ab" * 32,
+        ))
+        time.sleep(0.5)
+
+        assert victim.state.snapshot().get("session") is None
+        assert victim._injector is None
+        attacker_link.close()
+    finally:
+        victim.stop()
+        holder["server"].stop()
+
+
+def test_a_disconnect_on_a_refused_link_does_not_kill_the_live_one(tmp_path):
+    """Refusing a second caller must not take down the peer we are talking
+    to -- otherwise anyone on the LAN can drop the session at will."""
+    from mouseshare.network import MessageClient, MessageServer
+
+    silent = MessageServer("127.0.0.1", 0, lambda m: None)
+    silent.start()
+
+    victim = App(lambda s: None, cfg_path=tmp_path / "victim.json")
+    victim.state.mark_ready()
+    victim._server = MessageServer(
+        "127.0.0.1", 0, victim._on_message, victim._on_disconnect
+    )
+    victim._server.start()
+    try:
+        victim.connect_manually("127.0.0.1", silent.port)
+        assert wait_for(lambda: victim._client is not None)
+
+        intruder = MessageClient("127.0.0.1", victim._server.port)
+        intruder.connect()
+        intruder.close()
+        time.sleep(0.4)
+
+        assert victim._client is not None, "the outbound link was collateral"
+        assert victim._client.is_connected()
+    finally:
+        victim.stop()
+        silent.stop()

@@ -49,6 +49,8 @@ class App:
         self._nonce = ""
         self._role = ""
         self._phase = "idle"
+        # Which link owns the handshake: "in", "out", or nobody yet.
+        self._active: Optional[str] = None
         self._tearing_down = False
         self._host: Optional[HostSession] = None
         self._client_session: Optional[ClientSession] = None
@@ -112,7 +114,9 @@ class App:
         for port, fallback in ((self.cfg.port, False), (0, True)):
             try:
                 self._server = MessageServer(
-                    "0.0.0.0", port, self._on_message, self._on_disconnect
+                    "0.0.0.0", port,
+                    lambda m: self._on_message(m, "in"),
+                    lambda r: self._on_disconnect(r, "in"),
                 )
             except OSError as exc:
                 if not fallback:
@@ -367,10 +371,14 @@ class App:
             return self.state.snapshot()
 
         self._client = client
+        self._active = "out"
         self._peer_id = peer_id
         self._role = "host"
         self._phase = "offered"
-        client.start_reader(self._on_message, self._on_disconnect)
+        client.start_reader(
+            lambda m: self._on_message(m, "out"),
+            lambda r: self._on_disconnect(r, "out"),
+        )
         client.send(protocol.pair_request(self.cfg.device_id, self.cfg.name))
         self.state.set(
             screen="pairing",
@@ -380,17 +388,26 @@ class App:
         return self.state.snapshot()
 
     def _send(self, msg: dict) -> None:
-        link = self._client if self._role == "host" and self._client else self._server
+        """Answer on the link that owns the handshake, never the other one."""
+        link = self._client if self._active == "out" else self._server
         if link is not None:
             link.send(msg)
 
-    def _send_to_server(self, msg: dict) -> None:
-        """Answer the inbound link specifically, whatever role we hold."""
-        if self._server is not None:
-            self._server.send(msg)
+    def _refuse(self, source: str, reason: str) -> None:
+        """Hang up on one link without disturbing the live one."""
+        log.info("refusing %s link: %s", source, reason)
+        if source == "out" and self._client is not None:
+            self._client.close()
+        elif source == "in" and self._server is not None:
+            self._server.disconnect(reason)
 
     def _drop_outbound(self) -> None:
-        """Give up our own outbound attempt, keeping the inbound one."""
+        """Give up our own outbound attempt in favour of an inbound one.
+
+        `_active` moves first: closing the client fires a disconnect, and
+        that must be recognised as the losing link's, not the session's.
+        """
+        self._active = "in"
         if self._client is not None:
             self._client.close()
             self._client = None
@@ -416,8 +433,22 @@ class App:
         "session": {"layout", "enter", "pos", "click", "scroll", "key", "leave"},
     }
 
-    def _on_message(self, msg: dict) -> None:
+    def _on_message(self, msg: dict, source: str = "in") -> None:
         t = msg.get("t")
+        with self._lock:
+            if self._active is None and source == "in":
+                self._active = "in"  # a fresh caller claims the handshake
+            if source != self._active:
+                # The phase belongs to a socket, not to this app. While we
+                # are dialling out, our phase legitimately accepts pair_ok
+                # -- and an unauthenticated inbound socket must not be able
+                # to spend that on our behalf.
+                if t == "pair_request" and self._active == "out":
+                    self._arbitrate(msg)
+                    return
+                self._refuse(source, f"{t!r} on a link that owns nothing")
+                return
+
         if t not in self._ALLOWED.get(self._phase, set()):
             # Without this, an unsolicited pair_ok would start a session on
             # a socket that never proved anything, and the whole handshake
@@ -437,6 +468,25 @@ class App:
             log.exception("message handling failed")
             self.state.set(error=f"Connection dropped: {exc}")
             self._teardown("bad message")
+
+    def _arbitrate(self, msg: dict) -> None:
+        """Both machines pressed Connect at the same moment.
+
+        Each side runs the same comparison on the same two ids and reaches
+        the same answer, so exactly one link survives -- decided before
+        either machine starts suppressing input.
+        """
+        incoming = msg.get("device_id", "")
+        if not incoming or incoming == self.cfg.device_id:
+            self._refuse("in", "missing or self device id")
+            return
+        if session.pick_winner(self.cfg.device_id, incoming) == self.cfg.device_id:
+            log.info("simultaneous connect: keeping our outbound link")
+            self._refuse("in", "we won the tie-break")
+            return
+        log.info("simultaneous connect: yielding to %s", incoming)
+        self._drop_outbound()
+        self._begin_target_pairing(msg)
 
     def _dispatch(self, msg: dict) -> None:
         t = msg.get("t")
@@ -470,19 +520,7 @@ class App:
 
     def _begin_target_pairing(self, msg: dict) -> None:
         """We were connected to, so we are the client: show the code."""
-        incoming = msg["device_id"]
-        if self._phase in ("offered", "proved") and self._client is not None:
-            # Both machines pressed Connect. Each side runs the same
-            # comparison and reaches the same answer, before either starts
-            # suppressing input.
-            if session.pick_winner(self.cfg.device_id, incoming) == self.cfg.device_id:
-                log.info("simultaneous connect: keeping our outbound link")
-                self._send_to_server(protocol.pair_err("busy"))
-                return
-            log.info("simultaneous connect: yielding to %s", incoming)
-            self._drop_outbound()
-
-        self._peer_id = incoming
+        self._peer_id = msg["device_id"]
         self._peer_name = msg.get("name", "")
         self._role = "client"
         self._phase = "challenged"
@@ -516,17 +554,25 @@ class App:
         let an obsolete timer adopt a newer pairing and tear down a session
         that had nothing to do with it.
         """
-        while self._pending is mine and mine.remaining() > 0:
+        while True:
+            with self._lock:
+                if self._pending is not mine or mine.remaining() <= 0:
+                    break
             time.sleep(1.0)
-            if self._pending is not mine:
-                return
-            snapshot = self.state.snapshot().get("pairing")
-            if not snapshot or snapshot.get("role") != "target":
-                return
-            self.state.set(pairing={
-                **snapshot, "remaining": int(mine.remaining())
-            })
-        if self._pending is mine:
+            with self._lock:
+                # Re-check inside the lock: the reader thread clears
+                # _pending the instant the code is accepted, and acting on
+                # a stale read would update or tear down a newer pairing.
+                if self._pending is not mine:
+                    return
+                snapshot = self.state.snapshot().get("pairing")
+                if not snapshot or snapshot.get("role") != "target":
+                    return
+                remaining = int(mine.remaining())
+            self.state.set(pairing={**snapshot, "remaining": remaining})
+        with self._lock:
+            expired = self._pending is mine
+        if expired:
             self._teardown("code expired")
 
     def _on_challenge(self, msg: dict) -> None:
@@ -701,7 +747,12 @@ class App:
 
     # -- teardown ------------------------------------------------------------
 
-    def _on_disconnect(self, reason: str) -> None:
+    def _on_disconnect(self, reason: str, source: str = "in") -> None:
+        with self._lock:
+            if self._active is not None and source != self._active:
+                # A link we refused going away is not the session ending.
+                log.info("refused %s link closed (%s)", source, reason)
+                return
         log.info("link closed: %s", reason)
         self._teardown(reason)
 
@@ -711,6 +762,25 @@ class App:
             if self._tearing_down:
                 return  # closing a link re-enters here; do it once
             self._tearing_down = True
+
+        try:
+            self._do_teardown(reason)
+        finally:
+            # try/finally, because an exception on the way down must not
+            # leave the guard stuck True: that would disable every future
+            # teardown, and teardown is what releases a suppressed keyboard.
+            with self._lock:
+                self._tearing_down = False
+        self.state.set(
+            session=None,
+            pairing=None,
+            screen="devices",
+            error="" if reason in ("cancelled", "reconnecting") else f"Disconnected ({reason}).",
+        )
+        self._publish_peers()
+
+    def _do_teardown(self, reason: str) -> None:
+        with self._lock:
             if self._host is not None:
                 self._host.on_disconnect(reason)
             if self._client_session is not None:
@@ -730,11 +800,4 @@ class App:
             self._pending = None
             self._nonce = ""
             self._peer_monitors = []
-            self._tearing_down = False
-        self.state.set(
-            session=None,
-            pairing=None,
-            screen="devices",
-            error="" if reason in ("cancelled", "reconnecting") else f"Disconnected ({reason}).",
-        )
-        self._publish_peers()
+            self._active = None
