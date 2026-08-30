@@ -14,7 +14,10 @@ Download the build for each machine from
 [Releases](https://github.com/ArcSoftLabs/mouseshare/releases) and run it.
 
 - **Windows** — `mouseshare.exe`. Needs the WebView2 runtime, which is
-  already present on Windows 11 and on any updated Windows 10.
+  already present on Windows 11 and on any updated Windows 10. On first
+  launch Windows Firewall asks whether to allow it on public and private
+  networks: **allow it**, or the two machines cannot find or reach each
+  other. The build is unsigned, so SmartScreen may also warn.
 - **macOS** — `MouseShare.app`. The builds are unsigned, so the first
   launch needs right-click → Open. macOS will then ask for **Accessibility**
   and **Input Monitoring**; MouseShare cannot read or forward input without
@@ -26,6 +29,8 @@ Download the build for each machine from
 2. Press **Connect** on the machine whose keyboard and mouse you want to
    use. That machine becomes the host.
 3. The other machine shows a six-digit code. Type it into the first one.
+   You are asked once per pair of machines; after that they recognise each
+   other automatically.
 4. Under **Layout**, drag the two machines into the positions their screens
    really sit in. Edges snap together.
 
@@ -101,6 +106,8 @@ Before tagging, on both real machines:
 - [ ] Monitors at >100% scaling and on Retina land where the layout says.
 - [ ] A monitor placed left of or above the primary works.
 - [ ] The packaged app launches from its installed location.
+- [ ] Windows Firewall was allowed for the app, and the Mac granted the
+      local-network prompt.
 
 ## Limits
 
