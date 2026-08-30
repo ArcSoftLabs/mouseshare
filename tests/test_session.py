@@ -21,9 +21,11 @@ class FakeCapture:
     def __init__(self):
         self.suppressing = False
         self.stops = 0
+        self.anchor = None
 
-    def start_remote(self):
+    def start_remote(self, anchor):
         self.suppressing = True
+        self.anchor = anchor
 
     def stop_remote(self):
         self.suppressing = False
@@ -88,6 +90,35 @@ def test_touching_the_shared_edge_hands_the_cursor_to_the_peer():
     assert host.remote is True
     assert capture.suppressing is True
     assert send.sent[-1] == {"t": "enter", "x": 0, "y": 500}
+
+
+def test_the_cursor_is_parked_in_the_middle_of_the_screen_it_left():
+    """Parked on the edge it just touched, the OS clamps every further
+    move: pushing right yields no movement at all, and near a step in the
+    desktop outline it jumps sideways. Both read as an uncontrollable
+    cursor. The middle of the screen has room in every direction."""
+    host, capture, _, _ = a_host()
+    host.on_move(1919, 500)
+    assert capture.anchor == (960, 540)
+
+
+def test_the_park_uses_the_screen_the_cursor_actually_left():
+    """Two local screens; the one it left is not always the primary."""
+    layout = Layout(
+        monitors=[
+            Monitor(PC, "0", 0, 0, 1920, 1080, primary=True),
+            Monitor(PC, "1", 0, 1080, 1280, 720, primary=False),
+            Monitor(MAC, "0", 0, 0, 1728, 1117, primary=True),
+        ],
+        offsets={PC: (0, 0), MAC: (1920, 0)},
+    )
+    capture, injector, send = FakeCapture(), FakeInjector(), FakeSender()
+    host = HostSession(
+        layout=layout, local_id=PC, peer_id=MAC,
+        capture=capture, injector=injector, send=send,
+    )
+    host.on_move(1919, 300)
+    assert capture.anchor == (960, 540)
 
 
 def test_moving_inside_the_host_screen_does_not_hand_over():

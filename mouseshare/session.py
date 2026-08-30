@@ -12,7 +12,7 @@ else.** A machine left suppressing its own keyboard cannot be rescued from
 inside the app, because the user cannot type.
 """
 import logging
-from typing import Callable, Optional
+from typing import Callable, Optional, Tuple
 
 from . import protocol
 from .layout import Layout
@@ -57,6 +57,9 @@ class HostSession:
 
     def on_move(self, x: int, y: int) -> None:
         """Not remote: watch for the cursor pressing against a shared edge."""
+        if not getattr(self, "_saw_a_move", False):
+            self._saw_a_move = True
+            log.debug("capture is delivering moves, first at (%d,%d)", x, y)
         if self.remote:
             return
         # The OS clamps the cursor inside the screen, so a cursor "leaving"
@@ -65,15 +68,32 @@ class HostSession:
         if probe is None:
             return
         hit = self.layout.map_exit(self.local_id, *probe)
+        log.debug("edge at (%d,%d) probe=%s hit=%s", x, y, probe, hit)
         if hit is None or hit[0] != self.peer_id:
             return
         _, px, py = hit
         px, py = self.layout.clamp(self.peer_id, px, py)
         self.remote = True
         self._peer_pos = (px, py)
-        self.capture.start_remote()
+        self.capture.start_remote(self._park(x, y))
         log.info("cursor crossed to %s at (%d, %d)", self.peer_id, px, py)
         self._forward(protocol.enter(px, py))
+
+    def _park(self, x: int, y: int) -> Tuple[int, int]:
+        """Where to hold the real cursor while it is away.
+
+        Not where it left. The OS clamps the cursor to the desktop, so an
+        anchor on the edge reports nothing at all for further movement in
+        that direction, and where the desktop outline steps in or out the
+        clamp slides the position sideways and invents a large delta. The
+        middle of the screen it left has room on every side.
+        """
+        for m in self.layout.monitors:
+            if m.device_id != self.local_id:
+                continue
+            if m.x <= x < m.x + m.w and m.y <= y < m.y + m.h:
+                return (m.x + m.w // 2, m.y + m.h // 2)
+        return (x, y)
 
     def _probe(self, x: int, y: int) -> Optional[tuple]:
         for m in self.layout.monitors:

@@ -717,6 +717,12 @@ class App:
         )
         self._host.capture = self._capture
         self._capture.start()
+        for m in layout.monitors:
+            log.debug(
+                "plane rect %s/%s os=(%d,%d,%d,%d) plane=%s",
+                m.device_id, m.id, m.x, m.y, m.w, m.h,
+                layout.plane_rect(m.device_id, m.id),
+            )
         self._send(protocol.layout(monitors.to_wire(self.monitors)))
         self.state.set(
             screen="layout",

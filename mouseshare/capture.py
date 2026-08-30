@@ -98,11 +98,17 @@ class InputCapture:
         self._start_mouse(mouse)
         self._start_keyboard(keyboard)
 
-    def start_remote(self) -> None:
-        """Suppress local input and report movement as deltas instead."""
-        pos = self._controller.position
-        self._anchor = (int(pos[0]), int(pos[1]))
+    def start_remote(self, anchor: Tuple[int, int]) -> None:
+        """Suppress local input and report movement as deltas instead.
+
+        The caller chooses the anchor -- the middle of the screen the
+        cursor left -- and the real cursor is parked there. Left on the
+        edge it crossed, the OS clamp would eat every further move in that
+        direction and fabricate sideways jumps where the desktop steps.
+        """
+        self._anchor = (int(anchor[0]), int(anchor[1]))
         self.suppressing = True
+        self._controller.position = self._anchor
 
     def stop_remote(self) -> None:
         self.suppressing = False
@@ -152,6 +158,11 @@ class InputCapture:
                     dy = data.pt.y - self._anchor[1]
                     if (dx, dy) != (0, 0):
                         self._on_delta(dx, dy)
+                        # Suppressed moves leave the cursor where it was,
+                        # but injected ones -- gaming drivers and
+                        # accessibility tools re-post events, and those we
+                        # deliberately let past -- do move it.
+                        self._controller.position = self._anchor
                 elif msg in WM_CLICKS:
                     self._on_click(*WM_CLICKS[msg])
                 elif msg in (WM_MOUSEWHEEL, WM_MOUSEHWHEEL):
