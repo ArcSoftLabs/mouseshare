@@ -77,56 +77,74 @@ def test_a_move_passes_through_untouched_when_not_remote(rig):
     assert events == []
 
 
-def test_a_suppressed_move_reports_its_offset_from_the_anchor(rig):
+def test_a_suppressed_move_reports_its_offset_from_the_previous_one(rig):
     capture, filt, events = rig
-    capture.start_remote((960, 540))
+    capture.start_remote((960, 540), 300)
     events.clear()
-    with pytest.raises(Suppressed):
-        filt(WM_MOUSEMOVE, FakeData(970, 545))
-    assert events == [("delta", 10, 5)]
-
-
-def test_each_move_is_measured_from_the_anchor_not_the_previous_event(rig):
-    """Suppressed events never move the real cursor, so every hook event
-    carries anchor+delta. Measuring from the previous event would halve
-    the second move."""
-    capture, filt, events = rig
-    capture.start_remote((960, 540))
-    events.clear()
-    for x in (970, 980, 990):
+    for x in (960, 970, 980):
         with pytest.raises(Suppressed):
             filt(WM_MOUSEMOVE, FakeData(x, 540))
-    assert events == [("delta", 10, 0), ("delta", 20, 0), ("delta", 30, 0)]
+    assert events == [("delta", 10, 0), ("delta", 10, 0)]
 
 
-def test_the_cursor_is_put_back_on_the_anchor_after_every_delta(rig):
-    """The real cursor drifts off the anchor -- injected events move it,
-    and events already in flight when suppression began carry the old
-    position. Nothing else closes that gap, so every later event would
-    repeat the same bias and pin the peer cursor in a corner."""
+def test_the_first_move_after_going_remote_only_sets_the_baseline(rig):
+    """It can still carry the position from before the park -- most of a
+    screen away -- and reporting that as movement flings the peer cursor
+    into a corner before the user has moved at all."""
     capture, filt, events = rig
-    capture.start_remote((960, 540))
-    capture._controller.warps.clear()
+    capture.start_remote((960, 540), 300)
+    events.clear()
     with pytest.raises(Suppressed):
-        filt(WM_MOUSEMOVE, FakeData(970, 545))
+        filt(WM_MOUSEMOVE, FakeData(2559, 341))
+    assert events == []
+
+
+def test_moving_inside_the_radius_does_not_warp_the_real_cursor(rig):
+    """A warp per event is a syscall inside the hook that comes straight
+    back as another hook event. At a thousand reports a second Windows
+    stops calling a hook that slow, and everything dies with it."""
+    capture, filt, events = rig
+    capture.start_remote((960, 540), 300)
+    capture._controller.warps.clear()
+    for x in range(960, 980):
+        with pytest.raises(Suppressed):
+            filt(WM_MOUSEMOVE, FakeData(x, 540))
+    assert capture._controller.warps == []
+
+
+def test_straying_past_the_radius_warps_the_cursor_back(rig):
+    """Left to wander it reaches the screen edge, where the OS clamp eats
+    every further move in that direction."""
+    capture, filt, events = rig
+    capture.start_remote((960, 540), 300)
+    capture._controller.warps.clear()
+    for x in (960, 1261):
+        with pytest.raises(Suppressed):
+            filt(WM_MOUSEMOVE, FakeData(x, 540))
+    assert events[-1] == ("delta", 301, 0)
     assert capture._controller.warps == [(960, 540)]
 
 
-def test_an_injected_event_is_let_through_without_being_reported(rig):
-    """Our own warp comes back as an injected event. Reporting it would
-    double every movement."""
+def test_an_injected_move_rebases_instead_of_being_reported(rig):
+    """Our own warp comes back as an injected event, and other tools move
+    the cursor for real too. Neither is the user's hand, but both change
+    where the next real event starts from."""
     from mouseshare.capture import MOUSE_INJECTED_MASK
 
     capture, filt, events = rig
-    capture.start_remote((960, 540))
+    capture.start_remote((960, 540), 300)
     events.clear()
-    assert filt(WM_MOUSEMOVE, FakeData(960, 540, flags=MOUSE_INJECTED_MASK)) is True
-    assert events == []
+    with pytest.raises(Suppressed):
+        filt(WM_MOUSEMOVE, FakeData(960, 540))
+    assert filt(WM_MOUSEMOVE, FakeData(1100, 600, flags=MOUSE_INJECTED_MASK)) is True
+    with pytest.raises(Suppressed):
+        filt(WM_MOUSEMOVE, FakeData(1105, 600))
+    assert events == [("delta", 5, 0)]
 
 
 def test_starting_remote_parks_the_real_cursor_on_the_anchor(rig):
     capture, filt, events = rig
-    capture.start_remote((960, 540))
+    capture.start_remote((960, 540), 300)
     assert capture._anchor == (960, 540)
     assert capture._controller.warps[-1] == (960, 540)
     assert capture.suppressing is True

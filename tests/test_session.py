@@ -23,9 +23,10 @@ class FakeCapture:
         self.stops = 0
         self.anchor = None
 
-    def start_remote(self, anchor):
+    def start_remote(self, anchor, radius):
         self.suppressing = True
         self.anchor = anchor
+        self.radius = radius
 
     def stop_remote(self):
         self.suppressing = False
@@ -102,6 +103,15 @@ def test_the_cursor_is_parked_in_the_middle_of_the_screen_it_left():
     assert capture.anchor == (960, 540)
 
 
+def test_the_cursor_may_roam_a_quarter_of_the_screen_before_being_warped():
+    """The capture needs somewhere to put the cursor back to, but warping
+    on every event costs a syscall inside the hook. A radius drawn from
+    the screen keeps it clear of the edge without doing that."""
+    host, capture, _, _ = a_host()
+    host.on_move(1919, 500)
+    assert capture.radius == 1080 // 4
+
+
 def test_the_park_uses_the_screen_the_cursor_actually_left():
     """Two local screens; the one it left is not always the primary."""
     layout = Layout(
@@ -151,6 +161,19 @@ def test_crossing_back_returns_control_and_places_the_local_cursor():
     assert capture.suppressing is False
     assert kinds(send)[-1] == "leave"
     assert ("move", 1910, 500) in injector.calls
+
+
+def test_the_returning_cursor_is_put_clear_of_the_edge_it_arrived_on():
+    """On the boundary pixel, the probe one pixel past it hits the peer
+    again -- and our own injected move is enough to trigger that, so the
+    cursor bounces straight back without the user touching anything."""
+    host, _, injector, _ = a_host()
+    host.on_move(1919, 500)
+    host.on_delta(-1, 0)
+    assert ("move", 1917, 500) in injector.calls
+
+    host.on_move(1917, 500)  # the injected move, seen by the capture
+    assert host.remote is False
 
 
 def test_clicks_and_keys_only_travel_while_remote():

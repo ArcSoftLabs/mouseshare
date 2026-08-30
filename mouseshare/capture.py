@@ -25,13 +25,12 @@ Platform mechanics, verified against the pynput 1.8.2 sources:
   and `_RELEASE_MESSAGES` include the `WM_SYSKEY*` variants, so Alt
   combinations are not lost.
 
-  Suppressed events never move the real cursor, so it stays frozen at the
-  anchor and every `WM_MOUSEMOVE` carries anchor+delta in `data.pt`.
-
 - **macOS.** `_handler` dispatches callbacks *before* consulting
-  `darwin_intercept`, so the normal handlers keep firing while suppressing;
-  we compute deltas against the anchor and warp the cursor back to it. Our
-  warp is an injected event, which the intercept passes through.
+  `darwin_intercept`, so the normal handlers keep firing while suppressing.
+
+Either way movement is measured from the previous event's position, and
+the cursor is only warped back to the anchor once it has wandered near
+the screen edge. See `_moved`.
 """
 import ctypes
 import sys
@@ -83,6 +82,8 @@ class InputCapture:
         self._on_key = on_key
         self.suppressing = False
         self._anchor = (0, 0)
+        self._radius = 1
+        self._last: Optional[Tuple[int, int]] = None
         self._mouse_listener = None
         self._key_listener = None
         self._controller = None
@@ -98,24 +99,53 @@ class InputCapture:
         self._start_mouse(mouse)
         self._start_keyboard(keyboard)
 
-    def start_remote(self, anchor: Tuple[int, int]) -> None:
+    def start_remote(self, anchor: Tuple[int, int], radius: int) -> None:
         """Suppress local input and report movement as deltas instead.
 
         The caller chooses the anchor -- the middle of the screen the
         cursor left -- and the real cursor is parked there. Left on the
         edge it crossed, the OS clamp would eat every further move in that
         direction and fabricate sideways jumps where the desktop steps.
+        `radius` is how far the cursor may wander from the anchor before
+        it is put back, and must keep it clear of the screen edge.
         """
         self._anchor = (int(anchor[0]), int(anchor[1]))
-        # Park before suppressing, not after: anything still in the hook
-        # pipeline then takes the normal path, where the session drops it
-        # for being remote already, instead of being read as a deliberate
-        # move away from an anchor the cursor has not reached yet.
+        self._radius = int(radius)
+        # No baseline yet: the next event may still carry the position from
+        # before the park, and measuring against the anchor would read a
+        # whole screen of travel the user never made.
+        self._last = None
         self._controller.position = self._anchor
         self.suppressing = True
 
     def stop_remote(self) -> None:
         self.suppressing = False
+        self._last = None
+
+    def _moved(self, x: int, y: int) -> None:
+        """Report movement since the last known position, and keep the
+        real cursor away from the screen edge.
+
+        Measured from the previous event rather than from the anchor, so
+        the cursor does not have to be warped back after every one. That
+        warp was a syscall inside the hook callback which came straight
+        back as another hook event, and Windows stops calling a hook that
+        cannot keep up -- taking edge detection down with it. A stray
+        injected event now costs one wrong delta instead of a permanent
+        bias, because the next event measures from where the cursor
+        actually is.
+        """
+        if self._last is not None:
+            dx, dy = x - self._last[0], y - self._last[1]
+            if (dx, dy) != (0, 0):
+                self._on_delta(dx, dy)
+        self._last = (x, y)
+        if (
+            abs(x - self._anchor[0]) > self._radius
+            or abs(y - self._anchor[1]) > self._radius
+        ):
+            self._controller.position = self._anchor
+            self._last = self._anchor
 
     def stop(self) -> None:
         self.suppressing = False
@@ -130,10 +160,7 @@ class InputCapture:
         def handle_move(x, y, *_):
             if self.suppressing:
                 # macOS path: callbacks fire even for suppressed events.
-                dx, dy = int(x) - self._anchor[0], int(y) - self._anchor[1]
-                if (dx, dy) != (0, 0):
-                    self._on_delta(dx, dy)
-                    self._controller.position = self._anchor
+                self._moved(int(x), int(y))
             else:
                 self._on_move(int(x), int(y))
 
@@ -156,20 +183,14 @@ class InputCapture:
                     # tool's, and swallowing all injected input would break
                     # accessibility software outright. Physical input --
                     # the thing the user is holding -- is still suppressed.
+                    if msg == WM_MOUSEMOVE:
+                        # It moved the real cursor, so it is where the next
+                        # real event starts from -- but it was not the
+                        # user's hand, so it is not movement to forward.
+                        self._last = (data.pt.x, data.pt.y)
                     return True
                 if msg == WM_MOUSEMOVE:
-                    dx = data.pt.x - self._anchor[0]
-                    dy = data.pt.y - self._anchor[1]
-                    if (dx, dy) != (0, 0):
-                        self._on_delta(dx, dy)
-                        # Put it back every time. The cursor does drift off
-                        # the anchor -- injected events are let through
-                        # above and move it for real, and events already in
-                        # the hook pipeline when suppression began still
-                        # carry the old position. Left uncorrected the gap
-                        # never closes: every later event repeats the same
-                        # bias and the peer cursor sticks in a corner.
-                        self._controller.position = self._anchor
+                    self._moved(data.pt.x, data.pt.y)
                 elif msg in WM_CLICKS:
                     self._on_click(*WM_CLICKS[msg])
                 elif msg in (WM_MOUSEWHEEL, WM_MOUSEHWHEEL):

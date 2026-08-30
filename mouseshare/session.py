@@ -19,6 +19,11 @@ from .layout import Layout
 
 log = logging.getLogger("mouseshare")
 
+# How far inside its own screen a returning cursor is placed. The edge
+# probe reaches one pixel past the boundary, so anything more than that
+# stops the cursor bouncing straight back to the peer.
+EDGE_MARGIN = 2
+
 
 def pick_winner(initiator_a: str, initiator_b: str) -> str:
     """Which of two simultaneous connections survives.
@@ -75,24 +80,44 @@ class HostSession:
         px, py = self.layout.clamp(self.peer_id, px, py)
         self.remote = True
         self._peer_pos = (px, py)
-        self.capture.start_remote(self._park(x, y))
+        self.capture.start_remote(*self._park(x, y))
         log.info("cursor crossed to %s at (%d, %d)", self.peer_id, px, py)
         self._forward(protocol.enter(px, py))
 
-    def _park(self, x: int, y: int) -> Tuple[int, int]:
-        """Where to hold the real cursor while it is away.
+    def _park(self, x: int, y: int) -> Tuple[Tuple[int, int], int]:
+        """Where to hold the real cursor while it is away, and how far it
+        may drift from there before being put back.
 
         Not where it left. The OS clamps the cursor to the desktop, so an
         anchor on the edge reports nothing at all for further movement in
         that direction, and where the desktop outline steps in or out the
         clamp slides the position sideways and invents a large delta. The
-        middle of the screen it left has room on every side.
+        middle of the screen it left has room on every side -- a quarter
+        of it in each direction, which is what the capture is given.
         """
         for m in self.layout.monitors:
             if m.device_id != self.local_id:
                 continue
             if m.x <= x < m.x + m.w and m.y <= y < m.y + m.h:
-                return (m.x + m.w // 2, m.y + m.h // 2)
+                return (m.x + m.w // 2, m.y + m.h // 2), min(m.w, m.h) // 4
+        return (x, y), 1
+
+    def _inset(self, x: int, y: int) -> Tuple[int, int]:
+        """Pull a returning cursor clear of the edge it arrived on.
+
+        Left on the boundary pixel, the probe one pixel past it hits the
+        peer again -- and the injected move putting it there is itself
+        enough to trigger that, so the cursor leaves again before the user
+        has touched anything.
+        """
+        for m in self.layout.monitors:
+            if m.device_id != self.local_id:
+                continue
+            if m.x <= x < m.x + m.w and m.y <= y < m.y + m.h:
+                return (
+                    min(max(x, m.x + EDGE_MARGIN), m.x + m.w - 1 - EDGE_MARGIN),
+                    min(max(y, m.y + EDGE_MARGIN), m.y + m.h - 1 - EDGE_MARGIN),
+                )
         return (x, y)
 
     def _probe(self, x: int, y: int) -> Optional[tuple]:
@@ -119,7 +144,7 @@ class HostSession:
         hit = self.layout.map_exit(self.peer_id, nx, ny)
         if hit is not None and hit[0] == self.local_id:
             _, hx, hy = hit
-            hx, hy = self.layout.clamp(self.local_id, hx, hy)
+            hx, hy = self._inset(*self.layout.clamp(self.local_id, hx, hy))
             log.info("cursor returned to %s at (%d, %d)", self.local_id, hx, hy)
             self._release()
             self._forward(protocol.leave())
