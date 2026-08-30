@@ -158,11 +158,12 @@ class InputCapture:
                     dy = data.pt.y - self._anchor[1]
                     if (dx, dy) != (0, 0):
                         self._on_delta(dx, dy)
-                        # Suppressed moves leave the cursor where it was,
-                        # but injected ones -- gaming drivers and
-                        # accessibility tools re-post events, and those we
-                        # deliberately let past -- do move it.
-                        self._controller.position = self._anchor
+                        # No warp here. Suppressed events never move the
+                        # real cursor, so it is already on the anchor, and
+                        # a needless SetCursorPos per event costs the hook
+                        # its budget at a gaming mouse's report rate.
+                        # Injected events -- the ones that do move it --
+                        # return above and are corrected in handle_move.
                 elif msg in WM_CLICKS:
                     self._on_click(*WM_CLICKS[msg])
                 elif msg in (WM_MOUSEWHEEL, WM_MOUSEHWHEEL):

@@ -21,6 +21,7 @@ from .inject import Injector
 from .layout import Layout
 from .network import MessageClient, MessageServer
 from . import session
+from .outbox import Outbox
 from .session import ClientSession, HostSession
 from .state import StateOwner
 
@@ -55,6 +56,7 @@ class App:
         self._host: Optional[HostSession] = None
         self._client_session: Optional[ClientSession] = None
         self._capture: Optional[InputCapture] = None
+        self._outbox: Optional[Outbox] = None
         self._injector: Optional[Injector] = None
 
         self.state = StateOwner(deliver, initial={
@@ -700,13 +702,18 @@ class App:
         self._phase = "session"
         layout = self._build_layout()
         self._injector = Injector.create()
+        # The input hook must not wait on a socket; see outbox.py.
+        self._outbox = Outbox(
+            self._send,
+            on_error=lambda exc: self._on_disconnect(f"send failed: {exc}"),
+        )
         self._host = HostSession(
             layout=layout,
             local_id=self.cfg.device_id,
             peer_id=self._peer_id,
             capture=None,
             injector=self._injector,
-            send=self._send,
+            send=self._outbox.put,
         )
         self._capture = InputCapture(
             on_move=self._host.on_move,
@@ -793,6 +800,8 @@ class App:
                 self._client_session.on_disconnect(reason)
             if self._capture is not None:
                 self._capture.stop()
+            if self._outbox is not None:
+                self._outbox.stop()
             if self._client is not None:
                 self._client.close()
             if self._server is not None:
@@ -800,6 +809,7 @@ class App:
                 # so refusing it has to actually hang up.
                 self._server.disconnect(reason)
             self._host = self._client_session = self._capture = None
+            self._outbox = None
             self._client = self._injector = None
             self._role = ""
             self._phase = "idle"
