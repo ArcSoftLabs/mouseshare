@@ -126,7 +126,13 @@ def main() -> int:
 
     import webview
 
+    from . import macos
     from .app import App
+
+    # Must happen here: webview.start() runs `boot` on another thread, and
+    # every thread that later needs the keyboard layout would abort the
+    # process reading it. This is the last certain main thread.
+    macos.prewarm()
 
     window = None
 
