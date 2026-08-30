@@ -47,9 +47,9 @@ monitor they have.
         └──────────┬───────────┘      │ capture  (pynput listeners) │
                    │ js_api           └──────────────┬──────────────┘
         ┌──────────┴───────────┐                     │
-        │ ui/api.py            │◄────────────────────┘
-        │  state owner (lock)  │   publish(snapshot) — coalesced,
-        └──────────┬───────────┘   dispatched onto the UI thread
+        │ state.py StateOwner  │◄────────────────────┘
+        │  one lock, revisions │   publish(snapshot) — coalesced,
+        └──────────┬───────────┘   delivered to the page
                    │
         ┌──────────┴─────────────────────────────────┐
         │ session.py — roles, crossing, safety       │
@@ -70,15 +70,15 @@ Non-negotiable, and the reason it is stated first:
   nothing else.
 - zeroconf, the TCP reader, and both pynput listeners run on background
   threads they own.
-- **`ui/api.py` is the single state owner.** All mutation goes through one
-  lock. It holds a monotonic `revision` counter.
-- Background threads never touch the webview. They call
-  `api.publish()`, which coalesces and marshals onto the UI thread via
-  `window.evaluate_js`. Snapshots carrying a lower revision than the last
+- **`state.StateOwner` is the single state owner.** All mutation goes
+  through one lock. It holds a monotonic `revision` counter.
+- Background threads never touch the webview. They call `state.set()`,
+  which delivers one snapshot via `window.evaluate_js` under a separate
+  delivery lock. Snapshots carrying a lower revision than the last
   delivered one are dropped, so out-of-order publishes cannot rewind the UI.
-- The JS side calls `get_state()` once on load; `publish()` is a no-op
-  until that ready handshake, so state changing before the DOM exists is
-  not lost — it is simply read at handshake time.
+- The JS side calls `ready()` once on load; delivery is a no-op until that
+  handshake, so state changing before the DOM exists is not lost — it is
+  returned by the handshake instead.
 - Shutdown order: stop capture (un-suppressing), close connection, stop
   discovery, then quit the GUI loop.
 
@@ -138,8 +138,9 @@ smaller device id survives**; the other is closed. This is settled before
 either side enables suppression, so no window exists where both machines
 suppress input at once.
 
-`network.MessageServer` currently replaces `_conn` on any new inbound
-connection. It must instead refuse a second connection while one is live.
+`network.MessageServer` refuses a second inbound connection while one is
+live, rather than replacing it — otherwise any machine on the LAN could
+evict the paired peer.
 
 ### Monitor model and the shared plane
 
@@ -316,8 +317,9 @@ Dark by default, light via `prefers-color-scheme`. System font stack.
 | `monitors.py` | **new** — per-platform monitor enumeration |
 | `discovery.py` | **new** — zeroconf advertise + browse |
 | `pairing.py` | **new** — codes, HMAC, token store |
-| `session.py` | **new** — replaces `app.py`; roles, safety |
-| `ui/api.py` | **new** — state owner, js_api facade |
+| `session.py` | **new** — host/client roles, crossing, safety |
+| `app.py` | rewritten — wiring, handshake phases, js_api surface |
+| `state.py` | **new** — state owner, revisions, ready handshake |
 | `ui/web/` | **new** — index.html, app.js, style.css |
 | `layout_editor.py`, `app.py` | **deleted** |
 
@@ -437,8 +439,11 @@ is visible rather than lost:
   discovery is an explicit requirement from the owner, not an inference. A
   stated requirement outranks a code-size argument. The manual "Add by IP"
   field covers the failure modes that motivated the objection.
-- **"Merge `pairing.py` and `session.py`."** Partially declined.
-  `session.py` and `ui/api.py` are the natural merge if either turns out
-  thin, and they may be merged during implementation. `pairing` stays
-  separate: it is the one new unit with real cryptographic behaviour to
-  test, and a testable seam earns its file.
+- **"Merge `pairing.py` and `session.py`."** Partially declined, and the
+  part that was accepted did happen: the separate js_api facade is gone,
+  because it would have been a pass-through of the very method names
+  `app.py` already had. `pairing` stays its own file — it is the one new
+  unit with real cryptographic behaviour to test, and a testable seam
+  earns its file. `session.py` also stayed separate, and earned it: the
+  host/client logic is tested against fake capture and injection, which
+  would not be possible if it lived inside the wiring.
