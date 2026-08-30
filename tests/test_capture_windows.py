@@ -77,32 +77,36 @@ def test_a_move_passes_through_untouched_when_not_remote(rig):
     assert events == []
 
 
-def test_a_suppressed_move_reports_its_offset_from_the_previous_one(rig):
+def test_each_suppressed_move_reports_its_own_offset_from_the_anchor(rig):
+    """A suppressed event never reaches the desktop, so the real cursor
+    stays parked and every event carries the anchor plus that one event's
+    movement. Measured from the previous event instead, what gets
+    reported is the difference between two movements -- which oscillates
+    around zero, and the peer cursor never travels anywhere."""
     capture, filt, events = rig
     capture.start_remote((960, 540), 300)
     events.clear()
-    for x in (960, 970, 980):
+    for x in (962, 961, 963):
         with pytest.raises(Suppressed):
             filt(WM_MOUSEMOVE, FakeData(x, 540))
-    assert events == [("delta", 10, 0), ("delta", 10, 0)]
+    assert events == [("delta", 2, 0), ("delta", 1, 0), ("delta", 3, 0)]
 
 
-def test_a_jump_bigger_than_the_radius_is_the_cursor_being_moved_for_us(rig):
-    """The park, and the warps back to the anchor, reach the hook as
-    ordinary events -- Windows does not mark SetCursorPos as injected --
-    and events already in flight when suppression began still carry the
-    pre-park position. A hand covers no quarter-screen between two hook
-    events, so size is what tells them apart from real movement."""
+def test_a_jump_bigger_than_the_limit_is_not_the_user_moving(rig):
+    """The event already in the hook pipeline when suppression began
+    still carries the pre-park position, most of a screen away. Reported,
+    it flings the peer cursor into a corner before the user has moved."""
     capture, filt, events = rig
     capture.start_remote((960, 540), 300)
     events.clear()
-    for x in (2559, 960, 965):
-        with pytest.raises(Suppressed):
-            filt(WM_MOUSEMOVE, FakeData(x, 540))
-    assert events == [("delta", 5, 0)]
+    capture._controller.warps.clear()
+    with pytest.raises(Suppressed):
+        filt(WM_MOUSEMOVE, FakeData(2559, 341))
+    assert events == []
+    assert capture._controller.warps == [(960, 540)]
 
 
-def test_moving_inside_the_radius_does_not_warp_the_real_cursor(rig):
+def test_ordinary_movement_does_not_warp_the_real_cursor(rig):
     """A warp per event is a syscall inside the hook that comes straight
     back as another hook event. At a thousand reports a second Windows
     stops calling a hook that slow, and everything dies with it."""
@@ -115,34 +119,16 @@ def test_moving_inside_the_radius_does_not_warp_the_real_cursor(rig):
     assert capture._controller.warps == []
 
 
-def test_straying_past_the_radius_warps_the_cursor_back(rig):
-    """Left to wander it reaches the screen edge, where the OS clamp eats
-    every further move in that direction."""
-    capture, filt, events = rig
-    capture.start_remote((960, 540), 300)
-    capture._controller.warps.clear()
-    for x in (1200, 1270):
-        with pytest.raises(Suppressed):
-            filt(WM_MOUSEMOVE, FakeData(x, 540))
-    assert events[-1] == ("delta", 70, 0)
-    assert capture._controller.warps == [(960, 540)]
-
-
-def test_an_injected_move_rebases_instead_of_being_reported(rig):
-    """Our own warp comes back as an injected event, and other tools move
-    the cursor for real too. Neither is the user's hand, but both change
-    where the next real event starts from."""
+def test_an_injected_event_is_let_through_without_being_reported(rig):
+    """Other tools move the cursor for real. Swallowing that would break
+    accessibility software, but it is not the user's hand either."""
     from mouseshare.capture import MOUSE_INJECTED_MASK
 
     capture, filt, events = rig
     capture.start_remote((960, 540), 300)
     events.clear()
-    with pytest.raises(Suppressed):
-        filt(WM_MOUSEMOVE, FakeData(960, 540))
     assert filt(WM_MOUSEMOVE, FakeData(1100, 600, flags=MOUSE_INJECTED_MASK)) is True
-    with pytest.raises(Suppressed):
-        filt(WM_MOUSEMOVE, FakeData(1105, 600))
-    assert events == [("delta", 5, 0)]
+    assert events == []
 
 
 def test_starting_remote_parks_the_real_cursor_on_the_anchor(rig):

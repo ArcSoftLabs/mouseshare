@@ -23,10 +23,10 @@ class FakeCapture:
         self.stops = 0
         self.anchor = None
 
-    def start_remote(self, anchor, radius):
+    def start_remote(self, anchor, limit):
         self.suppressing = True
         self.anchor = anchor
-        self.radius = radius
+        self.limit = limit
 
     def stop_remote(self):
         self.suppressing = False
@@ -103,13 +103,12 @@ def test_the_cursor_is_parked_in_the_middle_of_the_screen_it_left():
     assert capture.anchor == (960, 540)
 
 
-def test_the_cursor_may_roam_a_quarter_of_the_screen_before_being_warped():
-    """The capture needs somewhere to put the cursor back to, but warping
-    on every event costs a syscall inside the hook. A radius drawn from
-    the screen keeps it clear of the edge without doing that."""
+def test_the_capture_is_told_how_big_a_jump_can_still_be_real_movement():
+    """Anything larger is the cursor being moved for us -- the event in
+    flight when suppression began still carries the pre-park position."""
     host, capture, _, _ = a_host()
     host.on_move(1919, 500)
-    assert capture.radius == 1080 // 4
+    assert capture.limit == 1080 // 4
 
 
 def test_the_park_uses_the_screen_the_cursor_actually_left():

@@ -85,15 +85,15 @@ class HostSession:
         self._forward(protocol.enter(px, py))
 
     def _park(self, x: int, y: int) -> Tuple[Tuple[int, int], int]:
-        """Where to hold the real cursor while it is away, and how far it
-        may drift from there before being put back.
+        """Where to hold the real cursor while it is away, and the largest
+        offset from there that can still be real movement.
 
         Not where it left. The OS clamps the cursor to the desktop, so an
         anchor on the edge reports nothing at all for further movement in
         that direction, and where the desktop outline steps in or out the
         clamp slides the position sideways and invents a large delta. The
-        middle of the screen it left has room on every side -- a quarter
-        of it in each direction, which is what the capture is given.
+        middle of the screen it left has room on every side, and no hand
+        covers a quarter of that screen inside one hook event.
         """
         for m in self.layout.monitors:
             if m.device_id != self.local_id:

@@ -82,8 +82,7 @@ class InputCapture:
         self._on_key = on_key
         self.suppressing = False
         self._anchor = (0, 0)
-        self._radius = 1
-        self._last = (0, 0)
+        self._limit = 1
         self._mouse_listener = None
         self._key_listener = None
         self._controller = None
@@ -99,19 +98,18 @@ class InputCapture:
         self._start_mouse(mouse)
         self._start_keyboard(keyboard)
 
-    def start_remote(self, anchor: Tuple[int, int], radius: int) -> None:
+    def start_remote(self, anchor: Tuple[int, int], limit: int) -> None:
         """Suppress local input and report movement as deltas instead.
 
         The caller chooses the anchor -- the middle of the screen the
         cursor left -- and the real cursor is parked there. Left on the
         edge it crossed, the OS clamp would eat every further move in that
         direction and fabricate sideways jumps where the desktop steps.
-        `radius` is how far the cursor may wander from the anchor before
-        it is put back, and must keep it clear of the screen edge.
+        `limit` is the largest offset from the anchor that can be real
+        movement; anything beyond it is the cursor being moved for us.
         """
         self._anchor = (int(anchor[0]), int(anchor[1]))
-        self._radius = int(radius)
-        self._last = self._anchor
+        self._limit = int(limit)
         self._controller.position = self._anchor
         self.suppressing = True
 
@@ -119,32 +117,24 @@ class InputCapture:
         self.suppressing = False
 
     def _moved(self, x: int, y: int) -> None:
-        """Report movement since the last known position, and keep the
-        real cursor away from the screen edge.
+        """Report one event's movement, measured from the anchor.
 
-        Measured from the previous event rather than from the anchor, so
-        the cursor does not have to be warped back after every one. That
-        warp was a syscall inside the hook callback which came straight
-        back as another hook event, and Windows stops calling a hook that
-        cannot keep up -- taking edge detection down with it.
+        A suppressed event never reaches the desktop, so the real cursor
+        stays parked and each event carries the anchor plus its own
+        movement. Nothing needs putting back afterwards -- and it must
+        not be, because a warp is a syscall inside the hook callback that
+        returns as another hook event, and Windows stops calling a hook
+        that cannot keep up at a thousand reports a second.
         """
-        dx, dy = x - self._last[0], y - self._last[1]
-        self._last = (x, y)
-        # A hand covers no quarter-screen between two hook events. A jump
-        # that large is the cursor being moved for us: the park, one of
-        # the warps below, or an event that was already in flight when
-        # suppression began. Windows does not mark SetCursorPos as
-        # injected, so size is the only thing that tells them apart --
-        # and by construction nothing but a warp can exceed the radius,
-        # because reaching it is what triggers one.
-        if max(abs(dx), abs(dy)) <= self._radius and (dx, dy) != (0, 0):
-            self._on_delta(dx, dy)
-        if (
-            abs(x - self._anchor[0]) > self._radius
-            or abs(y - self._anchor[1]) > self._radius
-        ):
+        dx, dy = x - self._anchor[0], y - self._anchor[1]
+        if max(abs(dx), abs(dy)) > self._limit:
+            # Not the user. The event already in the hook pipeline when
+            # suppression began still carries the pre-park position, and
+            # Windows does not mark our park as injected, so size is what
+            # tells them apart. Put the cursor back instead of reporting.
             self._controller.position = self._anchor
-            self._last = self._anchor
+        elif (dx, dy) != (0, 0):
+            self._on_delta(dx, dy)
 
     def stop(self) -> None:
         self.suppressing = False
@@ -186,11 +176,6 @@ class InputCapture:
                     # tool's, and swallowing all injected input would break
                     # accessibility software outright. Physical input --
                     # the thing the user is holding -- is still suppressed.
-                    if msg == WM_MOUSEMOVE:
-                        # It moved the real cursor, so it is where the next
-                        # real event starts from -- but it was not the
-                        # user's hand, so it is not movement to forward.
-                        self._last = (data.pt.x, data.pt.y)
                     return True
                 if msg == WM_MOUSEMOVE:
                     self._moved(data.pt.x, data.pt.y)
