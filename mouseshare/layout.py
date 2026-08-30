@@ -37,6 +37,28 @@ class Layout:
         s = self.screens[name]
         self.screens[name] = Screen(s.x, s.y, w, h)
 
+    def snap(self, mobile: str, anchor: str) -> None:
+        """Move `mobile` so it sits flush against the nearest edge of
+        `anchor`, eliminating any gap or overlap between them."""
+        a, m = self.screens[anchor], self.screens[mobile]
+        gaps = {
+            "right": abs(m.x - (a.x + a.w)),
+            "left": abs((m.x + m.w) - a.x),
+            "below": abs(m.y - (a.y + a.h)),
+            "above": abs((m.y + m.h) - a.y),
+        }
+        side = min(gaps, key=gaps.get)
+        x, y = m.x, m.y
+        if side == "right":
+            x = a.x + a.w
+        elif side == "left":
+            x = a.x - m.w
+        elif side == "below":
+            y = a.y + a.h
+        else:
+            y = a.y - m.h
+        self.screens[mobile] = Screen(x, y, m.w, m.h)
+
     def clamp(self, name: str, lx: int, ly: int) -> Tuple[int, int]:
         """Clamp a local point onto screen `name`."""
         screen = self.screens[name]

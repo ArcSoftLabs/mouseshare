@@ -27,6 +27,7 @@ class HostApp:
     def __init__(self, cfg: Config):
         self.layout = Layout(dict(cfg.screens))
         self.layout.set_size("host", *screen_size())
+        self.layout.snap("client", "host")
         self.server = MessageServer("0.0.0.0", cfg.port, self._on_message)
         self.remote = False  # True while the cursor is on the client screen
         self._client_pos = (0, 0)  # tracked position on the client screen
@@ -53,6 +54,7 @@ class HostApp:
             log.info("Client connected: %sx%s", msg.get("w"), msg.get("h"))
             with self._lock:
                 self.layout.set_size("client", msg["w"], msg["h"])
+                self.layout.snap("client", "host")
 
     # -- capture callbacks -------------------------------------------------
 

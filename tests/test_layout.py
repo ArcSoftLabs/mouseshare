@@ -61,6 +61,25 @@ def test_set_size_preserves_position():
     assert layout.screens["client"] == Screen(1920, 0, 2560, 1440)
 
 
+def test_snap_closes_gap_after_host_shrinks():
+    # MacBook case: host adopts a real size narrower than the configured
+    # default, leaving a dead gap before the client at x=1920
+    layout = side_by_side()
+    layout.set_size("host", 1440, 900)
+    layout.snap("client", "host")
+    assert layout.screens["client"] == Screen(1440, 0, 1920, 1080)
+    assert layout.map_exit("host", 1440, 500) == ("client", 0, 500)
+
+
+def test_snap_resolves_overlap():
+    layout = Layout({
+        "host": Screen(0, 0, 1920, 1080),
+        "client": Screen(1000, 0, 1920, 1080),  # overlapping the host
+    })
+    layout.snap("client", "host")
+    assert layout.screens["client"] == Screen(1920, 0, 1920, 1080)
+
+
 def test_clamp_keeps_cursor_on_screen():
     layout = side_by_side()
     assert layout.clamp("host", -5, 2000) == (0, 1079)

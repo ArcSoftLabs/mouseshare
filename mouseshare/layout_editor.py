@@ -3,7 +3,7 @@ import tkinter as tk
 from tkinter import messagebox, ttk
 
 from .config import Config, load, save
-from .layout import Screen
+from .layout import Layout, Screen
 
 SCALE = 0.12  # virtual pixels -> canvas pixels
 CANVAS_W, CANVAS_H = 720, 420
@@ -94,31 +94,10 @@ class LayoutEditor:
             return
         self.cfg.peer_host = self.ip_var.get().strip()
         self.cfg.port = port
-        self._snap_together()
+        Layout(self.cfg.screens).snap("client", "host")
         save(self.cfg)
         self._draw_screens()
         messagebox.showinfo("MouseShare", "Layout saved.")
-
-    def _snap_together(self) -> None:
-        """Snap the client to the nearest host edge so the screens touch."""
-        host, client = self.cfg.screens["host"], self.cfg.screens["client"]
-        gaps = {
-            "right": abs(client.x - (host.x + host.w)),
-            "left": abs((client.x + client.w) - host.x),
-            "below": abs(client.y - (host.y + host.h)),
-            "above": abs((client.y + client.h) - host.y),
-        }
-        side = min(gaps, key=gaps.get)
-        x, y = client.x, client.y
-        if side == "right":
-            x = host.x + host.w
-        elif side == "left":
-            x = host.x - client.w
-        elif side == "below":
-            y = host.y + host.h
-        else:
-            y = host.y - client.h
-        self.cfg.screens["client"] = Screen(x, y, client.w, client.h)
 
     def run(self) -> None:
         self.root.mainloop()

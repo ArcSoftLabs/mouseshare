@@ -73,5 +73,7 @@ macOS and Windows on every tagged release.
 ## Limitations (v0.1)
 
 - Two machines, one shared mouse; keyboard and clipboard are not shared.
+- Side/thumb buttons (X buttons) work locally but are not forwarded to the
+  remote screen yet.
 - Traffic is unencrypted — use on trusted networks only.
 - Single display per machine (use each machine's primary display).
