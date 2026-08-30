@@ -110,6 +110,11 @@ class HostSession:
         """Remote: move the tracked peer cursor, and watch for the return."""
         if not self.remote:
             return
+        self._deltas = getattr(self, "_deltas", 0) + 1
+        if self._deltas <= 20:
+            log.debug(
+                "delta %d: (%+d,%+d) from %s", self._deltas, dx, dy, self._peer_pos
+            )
         nx, ny = self._peer_pos[0] + dx, self._peer_pos[1] + dy
         hit = self.layout.map_exit(self.peer_id, nx, ny)
         if hit is not None and hit[0] == self.local_id:

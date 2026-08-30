@@ -107,8 +107,12 @@ class InputCapture:
         direction and fabricate sideways jumps where the desktop steps.
         """
         self._anchor = (int(anchor[0]), int(anchor[1]))
-        self.suppressing = True
+        # Park before suppressing, not after: anything still in the hook
+        # pipeline then takes the normal path, where the session drops it
+        # for being remote already, instead of being read as a deliberate
+        # move away from an anchor the cursor has not reached yet.
         self._controller.position = self._anchor
+        self.suppressing = True
 
     def stop_remote(self) -> None:
         self.suppressing = False
@@ -158,12 +162,14 @@ class InputCapture:
                     dy = data.pt.y - self._anchor[1]
                     if (dx, dy) != (0, 0):
                         self._on_delta(dx, dy)
-                        # No warp here. Suppressed events never move the
-                        # real cursor, so it is already on the anchor, and
-                        # a needless SetCursorPos per event costs the hook
-                        # its budget at a gaming mouse's report rate.
-                        # Injected events -- the ones that do move it --
-                        # return above and are corrected in handle_move.
+                        # Put it back every time. The cursor does drift off
+                        # the anchor -- injected events are let through
+                        # above and move it for real, and events already in
+                        # the hook pipeline when suppression began still
+                        # carry the old position. Left uncorrected the gap
+                        # never closes: every later event repeats the same
+                        # bias and the peer cursor sticks in a corner.
+                        self._controller.position = self._anchor
                 elif msg in WM_CLICKS:
                     self._on_click(*WM_CLICKS[msg])
                 elif msg in (WM_MOUSEWHEEL, WM_MOUSEHWHEEL):

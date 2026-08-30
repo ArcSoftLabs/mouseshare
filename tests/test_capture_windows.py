@@ -99,16 +99,17 @@ def test_each_move_is_measured_from_the_anchor_not_the_previous_event(rig):
     assert events == [("delta", 10, 0), ("delta", 20, 0), ("delta", 30, 0)]
 
 
-def test_a_suppressed_move_does_not_touch_the_real_cursor(rig):
-    """It is already on the anchor -- suppressed events never move it --
-    so a warp here would be a syscall per event, and the hook has a time
-    budget it loses the mouse for exceeding."""
+def test_the_cursor_is_put_back_on_the_anchor_after_every_delta(rig):
+    """The real cursor drifts off the anchor -- injected events move it,
+    and events already in flight when suppression began carry the old
+    position. Nothing else closes that gap, so every later event would
+    repeat the same bias and pin the peer cursor in a corner."""
     capture, filt, events = rig
     capture.start_remote((960, 540))
     capture._controller.warps.clear()
     with pytest.raises(Suppressed):
         filt(WM_MOUSEMOVE, FakeData(970, 545))
-    assert capture._controller.warps == []
+    assert capture._controller.warps == [(960, 540)]
 
 
 def test_an_injected_event_is_let_through_without_being_reported(rig):
