@@ -149,10 +149,10 @@ class InputCapture:
         def handle_move(x, y, *_):
             if self.suppressing:
                 # macOS path: callbacks fire even for suppressed events.
-                # Untested as a host: if the tap stops the move reaching
-                # the window server the cursor never leaves the anchor,
-                # every callback carries anchor+delta, and measuring from
-                # `_last` would telescope movement to nothing.
+                # Untested as a host. This assumes the intercept leaves
+                # the real cursor parked, as suppression does on Windows;
+                # if it does not, the offsets accumulate and the peer
+                # cursor runs away in whatever direction it was going.
                 self._moved(int(x), int(y))
             else:
                 self._on_move(int(x), int(y))
