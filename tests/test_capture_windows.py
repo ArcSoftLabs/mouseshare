@@ -87,16 +87,19 @@ def test_a_suppressed_move_reports_its_offset_from_the_previous_one(rig):
     assert events == [("delta", 10, 0), ("delta", 10, 0)]
 
 
-def test_the_first_move_after_going_remote_only_sets_the_baseline(rig):
-    """It can still carry the position from before the park -- most of a
-    screen away -- and reporting that as movement flings the peer cursor
-    into a corner before the user has moved at all."""
+def test_a_jump_bigger_than_the_radius_is_the_cursor_being_moved_for_us(rig):
+    """The park, and the warps back to the anchor, reach the hook as
+    ordinary events -- Windows does not mark SetCursorPos as injected --
+    and events already in flight when suppression began still carry the
+    pre-park position. A hand covers no quarter-screen between two hook
+    events, so size is what tells them apart from real movement."""
     capture, filt, events = rig
     capture.start_remote((960, 540), 300)
     events.clear()
-    with pytest.raises(Suppressed):
-        filt(WM_MOUSEMOVE, FakeData(2559, 341))
-    assert events == []
+    for x in (2559, 960, 965):
+        with pytest.raises(Suppressed):
+            filt(WM_MOUSEMOVE, FakeData(x, 540))
+    assert events == [("delta", 5, 0)]
 
 
 def test_moving_inside_the_radius_does_not_warp_the_real_cursor(rig):
@@ -118,10 +121,10 @@ def test_straying_past_the_radius_warps_the_cursor_back(rig):
     capture, filt, events = rig
     capture.start_remote((960, 540), 300)
     capture._controller.warps.clear()
-    for x in (960, 1261):
+    for x in (1200, 1270):
         with pytest.raises(Suppressed):
             filt(WM_MOUSEMOVE, FakeData(x, 540))
-    assert events[-1] == ("delta", 301, 0)
+    assert events[-1] == ("delta", 70, 0)
     assert capture._controller.warps == [(960, 540)]
 
 
