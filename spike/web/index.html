@@ -1,0 +1,36 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>MouseShare spike</title>
+<style>
+  body { font: 14px system-ui, sans-serif; margin: 0; padding: 24px;
+         background: #16171b; color: #e7e7ea; }
+  h1 { font-size: 15px; font-weight: 600; margin: 0 0 16px; }
+  .row { padding: 8px 0; border-bottom: 1px solid #2a2c33; }
+  .ok { color: #6ee7a8; } .bad { color: #ff8080; } .wait { color: #8a8d99; }
+</style>
+
+<h1>MouseShare packaging spike</h1>
+<div class="row">bridge round-trip: <span id="bridge" class="wait">waiting…</span></div>
+<div class="row">background push: <span id="push" class="wait">waiting…</span></div>
+
+<script>
+  // Python calls this from a background thread via evaluate_js.
+  window.onState = function (state) {
+    const el = document.getElementById('push');
+    el.textContent = 'received from ' + state.thread;
+    el.className = 'ok';
+    window.pywebview.api.report('push', state.thread);
+  };
+
+  window.addEventListener('pywebviewready', async function () {
+    const el = document.getElementById('bridge');
+    try {
+      const r = await window.pywebview.api.ping('hello');
+      el.textContent = 'pong=' + r.pong + ' pid=' + r.pid;
+      el.className = 'ok';
+    } catch (e) {
+      el.textContent = String(e);
+      el.className = 'bad';
+    }
+  });
+</script>
