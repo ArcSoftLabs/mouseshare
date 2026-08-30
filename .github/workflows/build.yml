@@ -2,7 +2,7 @@ name: build
 
 on:
   push:
-    branches: [main]
+    branches: [main, redesign]
     tags: ["v*"]
   pull_request:
   workflow_dispatch:
@@ -15,18 +15,24 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - run: pip install pytest
+      # The core is deliberately importable without a display, so the whole
+      # suite runs here. Capture, injection and monitor enumeration are
+      # verified by hand on the real machines -- see the release checklist.
+      - run: pip install pytest zeroconf screeninfo
       - run: python -m pytest tests -v
 
   package:
     needs: test
     strategy:
+      fail-fast: false
       matrix:
         include:
           - os: macos-latest
             artifact: MouseShare-macos
+            check: test -d dist/MouseShare.app
           - os: windows-latest
             artifact: MouseShare-windows
+            check: test -f dist/mouseshare.exe
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
@@ -35,10 +41,16 @@ jobs:
           python-version: "3.12"
       - run: pip install . pyinstaller
       - run: pyinstaller packaging/mouseshare.spec
+      - name: Check the expected artifact exists
+        shell: bash
+        run: ${{ matrix.check }}
+      - name: Ad-hoc sign so TCC identity is stable across rebuilds
+        if: matrix.os == 'macos-latest'
+        run: codesign --force --deep --sign - dist/MouseShare.app
       - uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.artifact }}
-          path: dist/*
+          path: dist/
 
   release:
     if: startsWith(github.ref, 'refs/tags/v')
@@ -52,8 +64,8 @@ jobs:
           path: artifacts
       - run: |
           cd artifacts
-          zip -j MouseShare-macos.zip MouseShare-macos/*
-          zip -j MouseShare-windows.zip MouseShare-windows/*
+          zip -r MouseShare-macos.zip MouseShare-macos
+          zip -r MouseShare-windows.zip MouseShare-windows
       - uses: softprops/action-gh-release@v2
         with:
           files: |

@@ -1,45 +1,72 @@
-"""CLI entry point.
+"""Entry point.
 
-  mouseshare host                start as host (machine with the mouse)
-  mouseshare client [HOST_IP]    start as client (mouse is injected here)
-  mouseshare layout              open the screen-layout editor (default)
+The webview owns the main thread -- pywebview requires it, and on macOS
+Cocoa does too. The application's own threads (discovery, the socket
+reader, the input listeners) are started from the GUI loop's `on_start`
+callback and never touch the window; they publish state, and this module
+is the only place that turns a snapshot into JavaScript.
 """
 import argparse
+import json
 import logging
+import os
+import sys
 
 from . import __version__
-from .config import load, save
 
 
-def main() -> None:
-    parser = argparse.ArgumentParser(prog="mouseshare", description=__doc__)
+def web_dir() -> str:
+    """The bundled UI, frozen or not."""
+    base = getattr(sys, "_MEIPASS", os.path.dirname(os.path.abspath(__file__)))
+    frozen = os.path.join(base, "ui", "web")
+    return frozen if os.path.exists(frozen) else os.path.join(
+        os.path.dirname(os.path.abspath(__file__)), "ui", "web"
+    )
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(prog="mouseshare", description=(
+        "Share one keyboard and mouse between this machine and another."
+    ))
     parser.add_argument("--version", action="version", version=__version__)
-    sub = parser.add_subparsers(dest="command")
-    sub.add_parser("host", help="run as host (the machine the mouse is plugged into)")
-    client = sub.add_parser("client", help="run as client (receives mouse input)")
-    client.add_argument("host_ip", nargs="?", help="host machine's IP address")
-    sub.add_parser("layout", help="open the screen layout editor")
+    parser.add_argument("--debug", action="store_true", help="verbose logging")
     args = parser.parse_args()
 
-    logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
-    cfg = load()
+    logging.basicConfig(
+        level=logging.DEBUG if args.debug else logging.INFO,
+        format="%(asctime)s %(levelname)-7s %(message)s",
+        datefmt="%H:%M:%S",
+    )
 
-    if args.command == "host":
-        from .app import HostApp
+    import webview
 
-        HostApp(cfg).run()
-    elif args.command == "client":
-        if args.host_ip:
-            cfg.peer_host = args.host_ip
-            save(cfg)
-        from .app import ClientApp
+    from .app import App
 
-        ClientApp(cfg).run()
-    else:
-        from .layout_editor import LayoutEditor
+    window = None
 
-        LayoutEditor(cfg).run()
+    def deliver(snapshot: dict) -> None:
+        if window is not None:
+            window.evaluate_js(f"window.onState({json.dumps(snapshot)})")
+
+    app = App(deliver)
+    window = webview.create_window(
+        "MouseShare",
+        os.path.join(web_dir(), "index.html"),
+        js_api=app,
+        width=1020,
+        height=720,
+        min_size=(860, 580),
+        background_color="#0d0e12",
+    )
+
+    try:
+        webview.start(lambda: app.start(), debug=args.debug)
+    finally:
+        # Closing the window quits, so this is the one shutdown path, and
+        # it must release input before anything else can go wrong.
+        app.stop()
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

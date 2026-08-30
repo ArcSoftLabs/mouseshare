@@ -34,8 +34,11 @@ def pair_request(device_id: str, name: str) -> dict:
     return {"t": "pair_request", "device_id": device_id, "name": name}
 
 
-def pair_challenge(nonce: str) -> dict:
-    return {"t": "pair_challenge", "nonce": nonce}
+def pair_challenge(nonce: str, device_id: str) -> dict:
+    """Carries the responder's own id: the proof transcript binds both
+    device ids, and a connector reaching a typed-in address does not know
+    the other machine's id until it is told."""
+    return {"t": "pair_challenge", "nonce": nonce, "device_id": device_id}
 
 
 def pair_proof(mac: str) -> dict:

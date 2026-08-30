@@ -36,10 +36,29 @@ def from_screens(device_id: str, screens: List[Any]) -> List[Monitor]:
     return out
 
 
-def enumerate_local(device_id: str) -> List[Monitor]:
-    from screeninfo import get_monitors
+FALLBACK = Monitor("", "0", 0, 0, 1920, 1080, primary=True)
 
-    return from_screens(device_id, get_monitors())
+
+def enumerate_local(device_id: str) -> List[Monitor]:
+    """This machine's monitors, or one assumed screen.
+
+    Enumeration fails on a headless session and on display setups the
+    backend does not recognise. Refusing to start would be the wrong
+    answer -- the layout editor exists precisely so a wrong guess can be
+    corrected by hand.
+    """
+    try:
+        from screeninfo import get_monitors
+
+        found = from_screens(device_id, get_monitors())
+    except Exception:  # noqa: BLE001 - any backend failure means "unknown"
+        found = []
+    if found:
+        return found
+    return [
+        Monitor(device_id, FALLBACK.id, FALLBACK.x, FALLBACK.y,
+                FALLBACK.w, FALLBACK.h, primary=True)
+    ]
 
 
 def to_wire(monitors: List[Monitor]) -> List[dict]:

@@ -1,79 +1,102 @@
 # MouseShare
 
-Share one mouse between a **Mac** and a **Windows PC** at the same time, over
-your local network — like a software KVM. Plug your mouse (e.g. a Logitech
-Hero Bluetooth mouse) into either machine, and glide the cursor from one
-computer's screen onto the other's, exactly where you configured the screens
-to sit.
+Share one keyboard and mouse between a Mac and a Windows PC. Move the
+cursor off the edge of one screen and it appears on the other, with the
+keyboard following it.
 
-> **How it works:** the mouse stays Bluetooth-paired to *one* machine (the
-> **host**). MouseShare captures its movement there and forwards it over TCP
-> to the other machine (the **client**), which injects the events. No
-> re-pairing, no dongle games — the mouse hardware never knows.
+Install it on both machines, find the other one on your network, type the
+code it shows you, then drag the screens into the arrangement you actually
+have. That is the whole setup.
 
 ## Install
 
-Download `MouseShare-macos.zip` or `MouseShare-windows.zip` from the
-[releases page](https://github.com/ArcSoftLabs/mouseshare/releases), unzip,
-and run the `mouseshare` executable. Or, from source on either machine:
+Download the build for each machine from
+[Releases](https://github.com/ArcSoftLabs/mouseshare/releases) and run it.
+
+- **Windows** — `mouseshare.exe`. Needs the WebView2 runtime, which is
+  already present on Windows 11 and on any updated Windows 10.
+- **macOS** — `MouseShare.app`. The builds are unsigned, so the first
+  launch needs right-click → Open. macOS will then ask for **Accessibility**
+  and **Input Monitoring**; MouseShare cannot read or forward input without
+  both. Settings shows their status if you skip the prompt.
+
+## Use
+
+1. Open MouseShare on both machines. Each finds the other under **Devices**.
+2. Press **Connect** on the machine whose keyboard and mouse you want to
+   use. That machine becomes the host.
+3. The other machine shows a six-digit code. Type it into the first one.
+4. Under **Layout**, drag the two machines into the positions their screens
+   really sit in. Edges snap together.
+
+Move the cursor past a shared edge and it crosses. Move it back and it
+returns. The code is asked for once; after that the two machines recognise
+each other automatically.
+
+## How it works
+
+Every install listens, advertises itself over mDNS, and browses for peers,
+so neither machine is configured as "the server". The one you press
+Connect on drives the session.
+
+The host suppresses its own mouse and keyboard while the cursor is on the
+other machine and forwards the events instead. The client is a dumb
+injector: it receives absolute coordinates already resolved against its own
+screens, and holds no layout of its own.
+
+Every monitor of both machines sits on a shared plane. Whole machines move
+on that plane; the monitors inside one machine keep the arrangement its OS
+reports, because that is the OS's business, not this app's.
+
+### Pairing
+
+The code proves a person can see both screens. The proof is an HMAC over a
+fresh nonce and both machine ids, so it cannot be replayed or aimed
+elsewhere. On success the target hands out a random 32-byte token, and
+every later connection proves knowledge of that token the same way. Neither
+the code nor the token is ever sent.
+
+**The session itself is not encrypted.** Keystrokes — passwords included —
+cross your LAN in clear JSON. For two personal machines on a home network
+that is a deliberate trade rather than an oversight; on a network you do
+not trust, do not use this.
+
+## Building
 
 ```sh
-pip install git+https://github.com/ArcSoftLabs/mouseshare
+pip install -e . pyinstaller
+pyinstaller packaging/mouseshare.spec
 ```
 
-## Usage
-
-1. **Configure the layout** (either machine): run `mouseshare` (or
-   `mouseshare layout`). Drag the two screen rectangles so they touch along
-   the edge where the cursor should cross — left/right/above/below, any
-   offset you like. Enter the host machine's LAN IP, and Save.
-2. **On the machine the mouse is plugged into:** `mouseshare host`
-3. **On the other machine:** `mouseshare client <host-ip>`
-
-Now push the cursor past the shared edge — it appears on the other computer.
-Clicks and scrolling follow it. Push back across the edge to return.
-
-Both directions work regardless of which OS hosts the mouse: Mac→Windows and
-Windows→Mac.
-
-## macOS permissions (required)
-
-macOS blocks global input capture/injection until you allow it. In **System
-Settings → Privacy & Security**, add the `mouseshare` executable (or your
-terminal app, when running from source) to both:
-
-- **Accessibility**
-- **Input Monitoring**
-
-Then restart MouseShare. Windows needs no special permissions.
-
-## Firewall
-
-The client connects to the host on TCP port **39471** (configurable in the
-layout editor). Allow it through the host's firewall for your local network.
-
-## Configuration file
-
-Saved at `~/.mouseshare/config.json` — screen rectangles on a shared virtual
-plane, the host IP, and the port. The layout editor is just a friendly way to
-edit it.
-
-## Development
+Tests run anywhere, with no display and no second machine:
 
 ```sh
-pip install -e . pytest
+pip install pytest zeroconf screeninfo
 python -m pytest tests
 ```
 
-The core (layout math, wire protocol, config, transport) is pure Python and
-fully tested; `capture.py`/`inject.py` are thin [pynput](https://pypi.org/project/pynput/)
-adapters. Packaged executables are built by GitHub Actions (PyInstaller) for
-macOS and Windows on every tagged release.
+The core is deliberately importable without a display, so protocol,
+pairing, layout, transport, session and state logic are all covered there.
+Input capture, injection and monitor enumeration are platform code and are
+verified by hand.
 
-## Limitations (v0.1)
+### Release checklist
 
-- Two machines, one shared mouse; keyboard and clipboard are not shared.
-- Side/thumb buttons (X buttons) work locally but are not forwarded to the
-  remote screen yet.
-- Traffic is unencrypted — use on trusted networks only.
-- Single display per machine (use each machine's primary display).
+Before tagging, on both real machines:
+
+- [ ] Cursor crosses in both directions and returns.
+- [ ] Keyboard follows the cursor; modifiers do not stick when crossing
+      mid-chord.
+- [ ] Killing the peer process while the cursor is remote restores local
+      input immediately.
+- [ ] Pulling the network cable while remote does the same.
+- [ ] macOS permission prompts appear, and Settings reports their state.
+- [ ] Monitors at >100% scaling and on Retina land where the layout says.
+- [ ] A monitor placed left of or above the primary works.
+- [ ] The packaged app launches from its installed location.
+
+## Limits
+
+Two machines, one at a time. No clipboard sharing, no file transfer, no
+keyboard remapping, no Linux build. Closing the window quits — minimize it
+to keep sharing.

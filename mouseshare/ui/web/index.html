@@ -1,0 +1,127 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>MouseShare</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<div class="shell">
+  <nav class="rail">
+    <div class="brand">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="4" width="11" height="8" rx="1.5"/><rect x="13" y="11" width="8" height="9" rx="1.5"/></svg>
+      <span>MouseShare</span>
+    </div>
+    <button class="tab" data-screen="devices"><i data-i="devices"></i>Devices</button>
+    <button class="tab" data-screen="layout"><i data-i="layout"></i>Layout</button>
+    <button class="tab" data-screen="settings"><i data-i="settings"></i>Settings</button>
+    <div class="rail-foot">
+      <div class="self">
+        <span class="dot on"></span>
+        <div>
+          <strong id="self-name">…</strong>
+          <small id="self-port"></small>
+        </div>
+      </div>
+    </div>
+  </nav>
+
+  <main>
+    <div id="banner" class="banner" hidden></div>
+
+    <!-- Devices ------------------------------------------------------- -->
+    <section data-screen="devices">
+      <header>
+        <h1>Devices</h1>
+        <p>Machines running MouseShare on your network.</p>
+      </header>
+      <div id="peers" class="cards"></div>
+      <div id="peers-empty" class="empty" hidden>
+        <div class="pulse"></div>
+        <h2>Looking for machines…</h2>
+        <p>Open MouseShare on your other computer. It will appear here.</p>
+      </div>
+      <details class="manual">
+        <summary>Connect by address instead</summary>
+        <div class="row">
+          <input id="manual-address" type="text" placeholder="192.168.1.24" spellcheck="false">
+          <button class="primary" id="manual-go">Connect</button>
+        </div>
+        <small>Use this if your network blocks discovery.</small>
+      </details>
+    </section>
+
+    <!-- Pairing ------------------------------------------------------- -->
+    <section data-screen="pairing" class="centered">
+      <div id="pair-target" hidden>
+        <h1>Pairing code</h1>
+        <p>Type this on <strong id="pair-peer-name">the other machine</strong>.</p>
+        <div id="code" class="code"></div>
+        <div class="countdown"><span id="pair-remaining">120</span>s remaining</div>
+        <button class="ghost" data-action="cancel">Cancel</button>
+      </div>
+
+      <div id="pair-connector" hidden>
+        <h1>Enter the code</h1>
+        <p>Six digits are showing on the machine you're connecting to.</p>
+        <div class="code entry" id="code-entry">
+          <input maxlength="1" inputmode="numeric"><input maxlength="1" inputmode="numeric">
+          <input maxlength="1" inputmode="numeric"><input maxlength="1" inputmode="numeric">
+          <input maxlength="1" inputmode="numeric"><input maxlength="1" inputmode="numeric">
+        </div>
+        <div class="row center">
+          <button class="ghost" data-action="cancel">Cancel</button>
+          <button class="primary" id="code-submit">Connect</button>
+        </div>
+      </div>
+    </section>
+
+    <!-- Layout -------------------------------------------------------- -->
+    <section data-screen="layout">
+      <header>
+        <h1>Screen layout</h1>
+        <p>Drag a machine to say where its screens sit. Edges snap together.</p>
+      </header>
+      <div id="canvas" class="canvas"></div>
+      <div id="layout-hint" class="empty small" hidden>
+        <h2>Nothing to arrange yet</h2>
+        <p>Connect to another machine and its screens will appear here.</p>
+      </div>
+    </section>
+
+    <!-- Settings ------------------------------------------------------ -->
+    <section data-screen="settings">
+      <header>
+        <h1>Settings</h1>
+        <p>This machine, and the ones it trusts.</p>
+      </header>
+
+      <div class="panel">
+        <label for="name-input">Machine name</label>
+        <div class="row">
+          <input id="name-input" type="text" spellcheck="false">
+          <button class="primary" id="name-save">Save</button>
+        </div>
+        <small>How this computer appears to others.</small>
+      </div>
+
+      <div class="panel" id="permissions-panel" hidden>
+        <label>macOS permissions</label>
+        <div id="permissions"></div>
+        <small>MouseShare cannot forward input without these. Rebuilding the
+        app may require approving them again.</small>
+      </div>
+
+      <div class="panel">
+        <label>Paired machines</label>
+        <div id="paired"></div>
+      </div>
+    </section>
+  </main>
+</div>
+
+<script src="app.js"></script>
+</body>
+</html>

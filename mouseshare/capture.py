@@ -1,28 +1,41 @@
-"""Global mouse capture with conditional suppression (host side).
+"""Global mouse and keyboard capture with conditional suppression (host).
 
 Thin adapter over pynput; imports are lazy so the tested core loads on any
 platform. Two modes:
 
 - Normal: events reach local apps untouched; `on_move(x, y)` reports the
-  absolute cursor position.
+  absolute cursor position and nothing else is forwarded.
 - Remote (between start_remote/stop_remote): events are suppressed
   system-wide and reported as callbacks instead.
 
-Platform mechanics differ (verified against pynput 1.8 sources):
+Platform mechanics, verified against the pynput 1.8.2 sources:
 
-- Windows: `suppress_event()` raises inside the low-level hook *before*
-  pynput dispatches callbacks, so while suppressing we decode the raw
-  message in `win32_event_filter` ourselves and forward it. Suppressed
-  events never move the real cursor, so it stays frozen at the anchor and
-  every WM_MOUSEMOVE carries anchor+delta in `data.pt`.
-- macOS: pynput dispatches callbacks *before* consulting
-  `darwin_intercept`, so normal handlers keep firing while suppressing; we
-  compute deltas against the anchor and warp the cursor back to it. Our
+- **Windows.** Only `suppress_event()` actually stops an event reaching
+  other applications: it raises `SuppressException`, which the hook
+  handler turns into a non-zero return. Returning `False` from the filter
+  merely skips pynput's own callback dispatch -- the hook still calls
+  `CallNextHookEx` and the keystroke lands in whatever app has focus. So
+  while suppressing we decode the raw event ourselves in the filter and
+  then raise.
+
+  Keys are decoded with the listener's own `_event_to_key()` rather than a
+  hand-written virtual-key table. That reuses pynput's `_SPECIAL_KEYS` map
+  and its `KeyTranslator`, so layouts, printables and left/right modifier
+  identity behave exactly as they do when not suppressing. `_PRESS_MESSAGES`
+  and `_RELEASE_MESSAGES` include the `WM_SYSKEY*` variants, so Alt
+  combinations are not lost.
+
+  Suppressed events never move the real cursor, so it stays frozen at the
+  anchor and every `WM_MOUSEMOVE` carries anchor+delta in `data.pt`.
+
+- **macOS.** `_handler` dispatches callbacks *before* consulting
+  `darwin_intercept`, so the normal handlers keep firing while suppressing;
+  we compute deltas against the anchor and warp the cursor back to it. Our
   warp is an injected event, which the intercept passes through.
 """
 import ctypes
 import sys
-from typing import Callable
+from typing import Callable, Optional, Tuple
 
 WM_MOUSEMOVE = 0x0200
 WM_MOUSEWHEEL = 0x020A
@@ -32,34 +45,81 @@ WM_CLICKS = {
     0x0204: ("right", True), 0x0205: ("right", False),
     0x0207: ("middle", True), 0x0208: ("middle", False),
 }
-LLMHF_INJECTED_MASK = 0x3
+# LLMHF_INJECTED | LLMHF_LOWER_IL_INJECTED
+MOUSE_INJECTED_MASK = 0x01 | 0x02
+# LLKHF_INJECTED | LLKHF_LOWER_IL_INJECTED
+KEY_INJECTED_MASK = 0x10 | 0x02
 
 
-class MouseCapture:
+def key_to_wire(key, key_enum) -> Optional[Tuple[str, str]]:
+    """Turn a pynput key into the tagged wire form, or None to drop it.
+
+    A key with no character -- a dead key mid-composition, or one pynput
+    could not translate -- is dropped rather than sent as junk the peer
+    could never resolve, and so could never release.
+    """
+    if key is None:
+        return None
+    name = getattr(key, "name", None)
+    if isinstance(key, key_enum) or (name and not hasattr(key, "char")):
+        return ("special", name)
+    char = getattr(key, "char", None)
+    return ("char", char) if char else None
+
+
+class InputCapture:
     def __init__(
         self,
         on_move: Callable[[int, int], None],
+        on_delta: Callable[[int, int], None],
         on_click: Callable[[str, bool], None],
         on_scroll: Callable[[int, int], None],
-        on_delta: Callable[[int, int], None],
+        on_key: Callable[[str, str, bool], None],
     ):
         self._on_move = on_move
+        self._on_delta = on_delta
         self._on_click = on_click
         self._on_scroll = on_scroll
-        self._on_delta = on_delta
+        self._on_key = on_key
         self.suppressing = False
         self._anchor = (0, 0)
-        self._listener = None
+        self._mouse_listener = None
+        self._key_listener = None
         self._controller = None
+        self._key_enum = None
+
+    # -- lifecycle -----------------------------------------------------------
 
     def start(self) -> None:
-        from pynput import mouse
+        from pynput import keyboard, mouse
 
         self._controller = mouse.Controller()
+        self._key_enum = keyboard.Key
+        self._start_mouse(mouse)
+        self._start_keyboard(keyboard)
 
-        def handle_move(x, y):
+    def start_remote(self) -> None:
+        """Suppress local input and report movement as deltas instead."""
+        pos = self._controller.position
+        self._anchor = (int(pos[0]), int(pos[1]))
+        self.suppressing = True
+
+    def stop_remote(self) -> None:
+        self.suppressing = False
+
+    def stop(self) -> None:
+        self.suppressing = False
+        for listener in (self._mouse_listener, self._key_listener):
+            if listener is not None:
+                listener.stop()
+        self._mouse_listener = self._key_listener = None
+
+    # -- mouse ---------------------------------------------------------------
+
+    def _start_mouse(self, mouse) -> None:
+        def handle_move(x, y, *_):
             if self.suppressing:
-                # macOS path: callbacks fire even for suppressed events
+                # macOS path: callbacks fire even for suppressed events.
                 dx, dy = int(x) - self._anchor[0], int(y) - self._anchor[1]
                 if (dx, dy) != (0, 0):
                     self._on_delta(dx, dy)
@@ -67,19 +127,21 @@ class MouseCapture:
             else:
                 self._on_move(int(x), int(y))
 
-        def handle_click(x, y, button, pressed):
-            self._on_click(button.name, pressed)
+        def handle_click(x, y, button, pressed, *_):
+            if self.suppressing:
+                self._on_click(button.name, pressed)
 
-        def handle_scroll(x, y, dx, dy):
-            self._on_scroll(int(dx), int(dy))
+        def handle_scroll(x, y, dx, dy, *_):
+            if self.suppressing:
+                self._on_scroll(int(dx), int(dy))
 
         kwargs = {}
         if sys.platform == "win32":
             def win32_event_filter(msg, data):
                 if not self.suppressing:
                     return True
-                if data.flags & LLMHF_INJECTED_MASK:
-                    return True  # synthetic event; not from the real mouse
+                if data.flags & MOUSE_INJECTED_MASK:
+                    return True  # our own warp, not the real mouse
                 if msg == WM_MOUSEMOVE:
                     dx = data.pt.x - self._anchor[0]
                     dy = data.pt.y - self._anchor[1]
@@ -89,43 +151,78 @@ class MouseCapture:
                     self._on_click(*WM_CLICKS[msg])
                 elif msg in (WM_MOUSEWHEEL, WM_MOUSEHWHEEL):
                     step = ctypes.c_int16(data.mouseData >> 16).value // 120
-                    self._on_scroll(0, step) if msg == WM_MOUSEWHEEL \
-                        else self._on_scroll(step, 0)
-                self._listener.suppress_event()  # raises; skips normal dispatch
+                    if msg == WM_MOUSEWHEEL:
+                        self._on_scroll(0, step)
+                    else:
+                        self._on_scroll(step, 0)
+                self._mouse_listener.suppress_event()  # raises; stops propagation
 
             kwargs["win32_event_filter"] = win32_event_filter
         elif sys.platform == "darwin":
-            def darwin_intercept(event_type, event):
-                if not self.suppressing:
-                    return event
-                import Quartz
+            kwargs["darwin_intercept"] = self._darwin_intercept
 
-                if Quartz.CGEventGetIntegerValueField(
-                    event, Quartz.kCGEventSourceUnixProcessID
-                ) != 0:
-                    return event  # our own warp; let it through
-                return None  # swallow the real event
-
-            kwargs["darwin_intercept"] = darwin_intercept
-
-        self._listener = mouse.Listener(
+        self._mouse_listener = mouse.Listener(
             on_move=handle_move,
             on_click=handle_click,
             on_scroll=handle_scroll,
             **kwargs,
         )
-        self._listener.start()
+        self._mouse_listener.start()
 
-    def start_remote(self) -> None:
-        """Suppress local events and report movement as deltas instead."""
-        pos = self._controller.position
-        self._anchor = (int(pos[0]), int(pos[1]))
-        self.suppressing = True
+    # -- keyboard ------------------------------------------------------------
 
-    def stop_remote(self) -> None:
-        self.suppressing = False
+    def _start_keyboard(self, keyboard) -> None:
+        def emit(key, pressed):
+            wire = key_to_wire(key, self._key_enum)
+            if wire is not None:
+                self._on_key(wire[0], wire[1], pressed)
 
-    def stop(self) -> None:
-        if self._listener is not None:
-            self._listener.stop()
-            self._listener = None
+        def handle_press(key, *_):
+            if self.suppressing:
+                emit(key, True)  # macOS: callbacks fire before the intercept
+
+        def handle_release(key, *_):
+            if self.suppressing:
+                emit(key, False)
+
+        kwargs = {}
+        if sys.platform == "win32":
+            def win32_event_filter(msg, data):
+                if not self.suppressing:
+                    return True
+                if data.flags & KEY_INJECTED_MASK:
+                    return True
+                listener = self._key_listener
+                if msg in listener._PRESS_MESSAGES or msg in listener._RELEASE_MESSAGES:
+                    pressed = msg in listener._PRESS_MESSAGES
+                    try:
+                        # pynput's own translation: special-key table plus
+                        # KeyTranslator for printables, so layouts and
+                        # left/right modifiers behave as they normally do.
+                        key = listener._event_to_key(msg, data.vkCode)
+                    except OSError:
+                        key = None
+                    emit(key, pressed)
+                listener.suppress_event()  # raises; stops propagation
+
+            kwargs["win32_event_filter"] = win32_event_filter
+        elif sys.platform == "darwin":
+            kwargs["darwin_intercept"] = self._darwin_intercept
+
+        self._key_listener = keyboard.Listener(
+            on_press=handle_press, on_release=handle_release, **kwargs
+        )
+        self._key_listener.start()
+
+    # -- shared --------------------------------------------------------------
+
+    def _darwin_intercept(self, event_type, event):
+        if not self.suppressing:
+            return event
+        import Quartz
+
+        if Quartz.CGEventGetIntegerValueField(
+            event, Quartz.kCGEventSourceUnixProcessID
+        ) != 0:
+            return event  # injected by us; let it through
+        return None  # swallow the real event

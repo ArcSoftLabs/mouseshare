@@ -4,15 +4,23 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "mouseshare"
-version = "0.1.1"
-description = "Share one mouse between a Mac and a Windows PC over the network, with a configurable screen layout"
+version = "0.2.0"
+description = "Share one keyboard and mouse between a Mac and a Windows PC over the network"
 readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "MIT" }
-dependencies = ["pynput>=1.7"]
+dependencies = [
+  "pynput>=1.8",
+  "pywebview>=5",
+  "zeroconf>=0.130",
+  "screeninfo>=0.8",
+]
 
 [project.scripts]
 mouseshare = "mouseshare.__main__:main"
 
 [tool.setuptools]
-packages = ["mouseshare"]
+packages = ["mouseshare", "mouseshare.ui"]
+
+[tool.setuptools.package-data]
+"mouseshare.ui" = ["web/*"]
