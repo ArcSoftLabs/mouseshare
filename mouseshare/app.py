@@ -25,7 +25,8 @@ class HostApp:
     """Runs on the machine the mouse is plugged into."""
 
     def __init__(self, cfg: Config):
-        self.layout = Layout(cfg.screens)
+        self.layout = Layout(dict(cfg.screens))
+        self.layout.set_size("host", *screen_size())
         self.server = MessageServer("0.0.0.0", cfg.port, self._on_message)
         self.remote = False  # True while the cursor is on the client screen
         self._client_pos = (0, 0)  # tracked position on the client screen
@@ -38,9 +39,8 @@ class HostApp:
             on_move=self._on_move,
             on_click=self._on_click,
             on_scroll=self._on_scroll,
+            on_delta=self._on_delta,
         )
-        host = self.layout.screens["host"]
-        self._center = (host.w // 2, host.h // 2)
 
     def run(self) -> None:
         self.server.start()
@@ -51,56 +51,52 @@ class HostApp:
     def _on_message(self, msg: dict) -> None:
         if msg.get("t") == "hello":
             log.info("Client connected: %sx%s", msg.get("w"), msg.get("h"))
+            with self._lock:
+                self.layout.set_size("client", msg["w"], msg["h"])
 
     # -- capture callbacks -------------------------------------------------
 
     def _on_move(self, x: int, y: int) -> None:
+        """Normal mode: watch for the cursor crossing onto the client."""
         with self._lock:
-            if self.remote:
-                self._remote_move(x, y)
-            else:
-                self._local_move(x, y)
+            if self.remote or not self.server.has_connection():
+                return
+            host = self.layout.screens["host"]
+            # The OS clamps the cursor to the screen, so probe one pixel
+            # beyond whichever edge the cursor is touching.
+            px = x + (1 if x >= host.w - 1 else -1 if x <= 0 else 0)
+            py = y + (1 if y >= host.h - 1 else -1 if y <= 0 else 0)
+            if (px, py) == (x, y):
+                return
+            hit = self.layout.map_exit("host", px, py)
+            if hit is None:
+                return
+            _, cx, cy = hit
+            cx, cy = self.layout.clamp("client", cx, cy)
+            log.info("Cursor crossed to client at (%d, %d)", cx, cy)
+            self.remote = True
+            self._client_pos = (cx, cy)
+            self.capture.start_remote()
+            self.server.send(protocol.enter(cx, cy))
 
-    def _local_move(self, x: int, y: int) -> None:
-        if not self.server.has_connection():
-            return
-        host = self.layout.screens["host"]
-        # The OS clamps the cursor to the screen, so probe one pixel beyond
-        # whichever edge the cursor is touching.
-        px = x + (1 if x >= host.w - 1 else -1 if x <= 0 else 0)
-        py = y + (1 if y >= host.h - 1 else -1 if y <= 0 else 0)
-        if (px, py) == (x, y):
-            return
-        hit = self.layout.map_exit("host", px, py)
-        if hit is None:
-            return
-        _, cx, cy = hit
-        cx, cy = self.layout.clamp("client", cx, cy)
-        log.info("Cursor crossed to client at (%d, %d)", cx, cy)
-        self.remote = True
-        self._client_pos = (cx, cy)
-        self.capture.suppressing = True
-        self.server.send(protocol.enter(cx, cy))
-        self.injector.move_to(*self._center)
-
-    def _remote_move(self, x: int, y: int) -> None:
-        dx, dy = x - self._center[0], y - self._center[1]
-        if (dx, dy) == (0, 0):
-            return  # synthetic event from our own warp
-        cx, cy = self._client_pos[0] + dx, self._client_pos[1] + dy
-        hit = self.layout.map_exit("client", cx, cy)
-        if hit is not None:
-            _, hx, hy = hit
-            hx, hy = self.layout.clamp("host", hx, hy)
-            log.info("Cursor returned to host at (%d, %d)", hx, hy)
-            self.remote = False
-            self.capture.suppressing = False
-            self.server.send(protocol.leave())
-            self.injector.move_to(hx, hy)
-            return
-        self._client_pos = self.layout.clamp("client", cx, cy)
-        self.server.send(protocol.move(dx, dy))
-        self.injector.move_to(*self._center)
+    def _on_delta(self, dx: int, dy: int) -> None:
+        """Remote mode: move the tracked client cursor, watch for return."""
+        with self._lock:
+            if not self.remote:
+                return
+            cx, cy = self._client_pos[0] + dx, self._client_pos[1] + dy
+            hit = self.layout.map_exit("client", cx, cy)
+            if hit is not None:
+                _, hx, hy = hit
+                hx, hy = self.layout.clamp("host", hx, hy)
+                log.info("Cursor returned to host at (%d, %d)", hx, hy)
+                self.remote = False
+                self.capture.stop_remote()
+                self.server.send(protocol.leave())
+                self.injector.move_to(hx, hy)
+                return
+            self._client_pos = self.layout.clamp("client", cx, cy)
+            self.server.send(protocol.pos(*self._client_pos))
 
     def _on_click(self, button: str, pressed: bool) -> None:
         if self.remote:
@@ -135,10 +131,8 @@ class ClientApp:
 
     def _on_message(self, msg: dict) -> None:
         t = msg.get("t")
-        if t == "enter":
+        if t == "enter" or t == "pos":
             self.injector.move_to(msg["x"], msg["y"])
-        elif t == "move":
-            self.injector.move_by(msg["dx"], msg["dy"])
         elif t == "click":
             self.injector.click(msg["button"], msg["pressed"])
         elif t == "scroll":

@@ -19,8 +19,8 @@ def enter(x: int, y: int) -> dict:
     return {"t": "enter", "x": x, "y": y}
 
 
-def move(dx: int, dy: int) -> dict:
-    return {"t": "move", "dx": dx, "dy": dy}
+def pos(x: int, y: int) -> dict:
+    return {"t": "pos", "x": x, "y": y}
 
 
 def click(button: str, pressed: bool) -> dict:

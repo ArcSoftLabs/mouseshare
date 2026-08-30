@@ -2,10 +2,10 @@ from mouseshare import protocol as p
 
 
 def test_encode_decode_round_trip():
-    msg = p.move(5, -3)
+    msg = p.pos(5, -3)
     line = p.encode(msg)
     assert line.endswith(b"\n")
-    assert p.decode(line) == {"t": "move", "dx": 5, "dy": -3}
+    assert p.decode(line) == {"t": "pos", "x": 5, "y": -3}
 
 
 def test_message_helpers():
@@ -18,12 +18,12 @@ def test_message_helpers():
 
 def test_line_buffer_reassembles_partial_and_multiple_messages():
     buf = p.LineBuffer()
-    data = p.encode(p.move(1, 1)) + p.encode(p.leave())
+    data = p.encode(p.pos(1, 1)) + p.encode(p.leave())
     # feed in awkward chunks
     msgs = list(buf.feed(data[:5]))
     assert msgs == []
     msgs = list(buf.feed(data[5:]))
-    assert msgs == [{"t": "move", "dx": 1, "dy": 1}, {"t": "leave"}]
+    assert msgs == [{"t": "pos", "x": 1, "y": 1}, {"t": "leave"}]
 
 
 def test_line_buffer_skips_garbage_lines():

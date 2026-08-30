@@ -41,9 +41,19 @@ reverse (client edge back onto host rect) ends remote mode.
 ### Wire protocol
 
 Newline-delimited JSON over one TCP connection, default port **39471**.
-Messages: `hello` (role + screen size), `layout` (host pushes current layout),
-`enter {x,y}`, `move {dx,dy}`, `click {button,pressed}`, `scroll {dx,dy}`,
-`leave`. JSON keeps it debuggable; volume (~125 events/s) is trivial for a LAN.
+Messages: `hello` (role + screen size; the host adopts the client's real
+resolution), `enter {x,y}`, `pos {x,y}` (absolute client-screen position —
+absolute rather than deltas so tracked and injected cursors cannot drift),
+`click {button,pressed}`, `scroll {dx,dy}`, `leave`. JSON keeps it
+debuggable; volume (~125 events/s) is trivial for a LAN.
+
+Suppression mechanics (verified against pynput 1.8 sources): on Windows,
+`suppress_event()` raises before pynput dispatches callbacks, so in remote
+mode the raw messages are decoded and forwarded from inside
+`win32_event_filter`; the frozen cursor makes `data.pt` = anchor + delta.
+On macOS callbacks fire before `darwin_intercept` decides suppression, and
+the intercept passes injected events through so the host's own re-anchoring
+warp survives.
 
 ### Modules
 

@@ -40,9 +40,9 @@ def test_server_sends_message_to_client():
         deadline = time.time() + 5
         while not server.has_connection() and time.time() < deadline:
             time.sleep(0.01)
-        server.send(p.move(2, 3))
+        server.send(p.pos(2, 3))
         assert done.wait(timeout=5)
-        assert received == [{"t": "move", "dx": 2, "dy": 3}]
+        assert received == [{"t": "pos", "x": 2, "y": 3}]
         client.close()
     finally:
         server.stop()

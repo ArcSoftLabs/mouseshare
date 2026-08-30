@@ -32,6 +32,11 @@ class Layout:
                 return other_name, vx - other.x, vy - other.y
         return None
 
+    def set_size(self, name: str, w: int, h: int) -> None:
+        """Replace a screen's dimensions with its actual measured size."""
+        s = self.screens[name]
+        self.screens[name] = Screen(s.x, s.y, w, h)
+
     def clamp(self, name: str, lx: int, ly: int) -> Tuple[int, int]:
         """Clamp a local point onto screen `name`."""
         screen = self.screens[name]

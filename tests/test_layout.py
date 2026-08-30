@@ -55,6 +55,12 @@ def test_offset_screens_only_shared_edge_crosses():
     assert layout.map_exit("host", 1920, 800) == ("client", 0, 500)
 
 
+def test_set_size_preserves_position():
+    layout = side_by_side()
+    layout.set_size("client", 2560, 1440)
+    assert layout.screens["client"] == Screen(1920, 0, 2560, 1440)
+
+
 def test_clamp_keeps_cursor_on_screen():
     layout = side_by_side()
     assert layout.clamp("host", -5, 2000) == (0, 1079)
