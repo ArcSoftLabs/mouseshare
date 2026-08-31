@@ -22,7 +22,12 @@ DEFAULT_PATH = Path.home() / ".mouseshare" / "config.json"
 class Peer:
     name: str
     token: str  # hex; proves us to this peer without ever being sent
+    # Where it answered last time. Kept because discovery is the first
+    # thing a firewall stops, and a machine you have already paired with
+    # should not become unreachable just because multicast went quiet.
+    # The port is its own, not ours: one already taken here is free there.
     last_address: str = ""
+    last_port: int = 0
 
 
 @dataclass
@@ -58,6 +63,7 @@ def load(path: Path = DEFAULT_PATH) -> Config:
             name=peer.get("name", ""),
             token=peer.get("token", ""),
             last_address=peer.get("last_address", ""),
+            last_port=peer.get("last_port", 0),
         )
     for device_id, offset in (raw.get("offsets") or {}).items():
         cfg.offsets[device_id] = (int(offset[0]), int(offset[1]))
@@ -94,6 +100,7 @@ def save(cfg: Config, path: Path = DEFAULT_PATH) -> None:
                 "name": p.name,
                 "token": p.token,
                 "last_address": p.last_address,
+                "last_port": p.last_port,
             }
             for device_id, p in cfg.peers.items()
         },

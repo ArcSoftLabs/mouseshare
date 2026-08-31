@@ -326,3 +326,81 @@ def test_the_debug_log_goes_somewhere_a_packaged_app_can_write(tmp_path, monkeyp
     path = log_path()
     assert os.path.isdir(os.path.dirname(path))
     open(path, "w").close()  # writable, which is the whole point
+
+
+# -- reaching a machine discovery has not found -------------------------------
+
+
+def test_a_paired_machine_stays_reachable_when_discovery_is_silent(tmp_path):
+    """Multicast is blocked often enough -- one dismissed firewall prompt
+    does it -- that discovery cannot be what decides whether a machine you
+    have already paired with and hold an address for can be connected to."""
+    from mouseshare import config
+
+    instance = make_app(tmp_path, "host", 0)
+    instance.cfg.peers["mac"] = config.Peer(
+        name="Mac mini", token="ab" * 32,
+        last_address="192.168.1.50", last_port=39471,
+    )
+    instance._publish_peers()
+
+    peer = instance.state.snapshot()["peers"][0]
+    assert peer["online"] is False        # honest: we have not heard from it
+    assert peer["reachable"] is True      # but we know where it lives
+    assert peer["address"] == "192.168.1.50"
+    assert peer["port"] == 39471          # its port, not ours
+
+
+def test_a_paired_machine_we_have_no_address_for_is_not_reachable(tmp_path):
+    from mouseshare import config
+
+    instance = make_app(tmp_path, "host", 0)
+    instance.cfg.peers["mac"] = config.Peer(name="Mac", token="ab" * 32)
+    instance._publish_peers()
+
+    assert instance.state.snapshot()["peers"][0]["reachable"] is False
+
+
+def test_connecting_to_an_undiscovered_machine_dials_its_last_known_port(
+    tmp_path, monkeypatch
+):
+    """Ports differ between machines: a port already taken here is free
+    there, so a fallback on one side must not be assumed on the other."""
+    from mouseshare import config
+
+    instance = make_app(tmp_path, "host", 0)
+    instance.cfg.port = 54009  # ours fell back; theirs did not
+    instance.cfg.peers["mac"] = config.Peer(
+        name="Mac", token="ab" * 32,
+        last_address="192.168.1.50", last_port=39471,
+    )
+    dialled = []
+    monkeypatch.setattr(
+        instance, "_connect_to",
+        lambda pid, addr, port: dialled.append((pid, addr, port)),
+    )
+    instance.connect("mac")
+
+    assert dialled == [("mac", "192.168.1.50", 39471)]
+
+
+def test_being_connected_to_does_not_erase_the_address_we_had(
+    tmp_path, monkeypatch
+):
+    """Pairing again from the other side used to overwrite the address
+    with nothing, which quietly cost us the only way back."""
+    from mouseshare import config
+
+    instance = make_app(tmp_path, "host", 0)
+    instance.cfg.peers["mac"] = config.Peer(
+        name="Mac", token="ab" * 32,
+        last_address="192.168.1.50", last_port=39471,
+    )
+    instance._peer_id = "mac"
+    instance._client = None  # they dialled us, so we have no outbound socket
+    # What is stored is the point here, not the session that follows it.
+    monkeypatch.setattr(instance, "_become_host", lambda: None)
+    instance._on_pair_ok({"name": "Mac", "monitors": [], "token": "cd" * 32})
+
+    assert instance.cfg.peers["mac"].last_address == "192.168.1.50"
+    assert instance.cfg.peers["mac"].last_port == 39471

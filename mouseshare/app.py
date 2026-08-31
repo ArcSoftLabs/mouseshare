@@ -187,9 +187,10 @@ class App:
         port = peer.port if peer else self.cfg.port
         saved = self.cfg.peers.get(peer_id)
         if not address and saved:
-            address, port = saved.last_address, self.cfg.port
+            address, port = saved.last_address, saved.last_port or self.cfg.port
         if not address:
-            self.state.set(error="That machine is no longer on the network.")
+            self.state.set(error="No address for that machine yet. "
+                                 "Connect to it once by typing its address.")
             return self.state.snapshot()
         return self._connect_to(peer_id, address, port)
 
@@ -363,12 +364,17 @@ class App:
                     "device_id": device_id,
                     "name": saved.name or device_id[:8],
                     "address": saved.last_address,
-                    "port": self.cfg.port,
+                    "port": saved.last_port or self.cfg.port,
                     "online": False,
                 }
         for device_id, entry in seen.items():
             entry["paired"] = device_id in self.cfg.peers
             entry["connected"] = device_id == self._peer_id and self._role != ""
+            # Separate from `online` on purpose. Being heard from and being
+            # reachable are different facts: one blocked multicast packet
+            # ends the first without touching the second, and gating the
+            # button on the wrong one strands the user with no way back in.
+            entry["reachable"] = bool(entry["address"])
         # Paired first, then online, then by name -- the machine you use is
         # the one you want at the top.
         self.state.set(peers=sorted(
@@ -662,10 +668,21 @@ class App:
         self._peer_monitors = monitors.from_wire(self._peer_id, msg["monitors"])
         token = msg.get("token", "")
         saved = self.cfg.peers.get(self._peer_id)
+        # Keep what we had when this session gave us nothing better: being
+        # dialled into leaves no outbound socket to read an address from,
+        # and overwriting with nothing would throw away the only way back
+        # to a machine whose discovery is blocked.
         self.cfg.peers[self._peer_id] = config.Peer(
             name=self._peer_name,
             token=token or (saved.token if saved else ""),
-            last_address=self._client._addr[0] if self._client else "",
+            last_address=(
+                self._client._addr[0] if self._client
+                else (saved.last_address if saved else "")
+            ),
+            last_port=(
+                self._client._addr[1] if self._client
+                else (saved.last_port if saved else 0)
+            ),
         )
         self.cfg.offsets.setdefault(self.cfg.device_id, (0, 0))
         if self._peer_id not in self.cfg.offsets:

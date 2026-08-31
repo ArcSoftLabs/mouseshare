@@ -69,8 +69,14 @@ function renderPeers() {
     meta.appendChild(el('strong', '', peer.name));
     const sub = el('span');
     sub.appendChild(el('span', 'dot' + (peer.online ? ' on' : '')));
+    // Not heard from is not the same as not reachable: say which it is,
+    // and offer the address we would dial rather than a flat "Offline"
+    // that reads as a dead end.
     sub.appendChild(document.createTextNode(
-      peer.connected ? 'Connected' : peer.online ? peer.address : 'Offline'
+      peer.connected ? 'Connected'
+        : peer.online ? peer.address
+        : peer.reachable ? `Last seen at ${peer.address}`
+        : 'No address yet'
     ));
     if (peer.paired) sub.appendChild(el('span', 'badge paired', 'paired'));
     meta.appendChild(sub);
@@ -78,7 +84,9 @@ function renderPeers() {
 
     const button = el('button', peer.connected ? 'ghost' : 'primary',
                       peer.connected ? 'Disconnect' : 'Connect');
-    button.disabled = !peer.online && !peer.connected;
+    // Reachable, not online. Discovery finds machines; it does not decide
+    // whether one we already hold an address for can be dialled.
+    button.disabled = !peer.reachable && !peer.connected;
     button.onclick = () => (peer.connected ? api().cancel() : api().connect(peer.device_id));
     card.appendChild(button);
     host.appendChild(card);
