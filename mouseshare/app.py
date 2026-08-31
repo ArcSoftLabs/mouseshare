@@ -58,6 +58,10 @@ class App:
         self._capture: Optional[InputCapture] = None
         self._outbox: Optional[Outbox] = None
         self._inbox: Optional[Outbox] = None
+        # Temporary; see _injection_cost.
+        self._inj_since = time.monotonic()
+        self._inj_n = self._inj_pos = 0
+        self._inj_total = self._inj_max = self._inj_pos_total = 0.0
         self._injector: Optional[Injector] = None
 
         self.state = StateOwner(deliver, initial={
@@ -754,10 +758,41 @@ class App:
         still healthy, and a dead queue would leave the user's own
         machine ignoring them with no sign of why.
         """
+        started = time.perf_counter()
         try:
             self._client_session.on_message(msg)
         except Exception:  # noqa: BLE001 - see above
             log.exception("could not inject %s", msg.get("t"))
+        self._injection_cost(msg.get("t"), time.perf_counter() - started)
+
+    def _injection_cost(self, kind: str, seconds: float) -> None:
+        """Temporary instrumentation: what does one injection actually cost?
+
+        The queue in front of this holds only the newest position, so if
+        the cursor still arrives late the time has to be going either
+        inside this call or somewhere past it that we cannot see.
+        """
+        if not log.isEnabledFor(logging.DEBUG):
+            return
+        us = seconds * 1e6
+        self._inj_n += 1
+        self._inj_total += us
+        self._inj_max = max(self._inj_max, us)
+        if kind == "pos":
+            self._inj_pos += 1
+            self._inj_pos_total += us
+        now = time.monotonic()
+        if now - self._inj_since < 5.0:
+            return
+        log.debug(
+            "inject: %d calls in %.1fs, mean %.0f us, worst %.0f us; "
+            "%d were pos, mean %.0f us",
+            self._inj_n, now - self._inj_since,
+            self._inj_total / max(self._inj_n, 1), self._inj_max,
+            self._inj_pos, self._inj_pos_total / max(self._inj_pos, 1),
+        )
+        self._inj_since, self._inj_n, self._inj_total, self._inj_max = now, 0, 0.0, 0.0
+        self._inj_pos = self._inj_pos_total = 0
 
     def _become_client(self) -> None:
         self._phase = "session"
