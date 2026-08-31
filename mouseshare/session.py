@@ -12,6 +12,7 @@ else.** A machine left suppressing its own keyboard cannot be rescued from
 inside the app, because the user cannot type.
 """
 import logging
+import time
 from typing import Callable, Optional, Tuple
 
 from . import protocol
@@ -57,6 +58,7 @@ class HostSession:
         self._send = send
         self.remote = False
         self._peer_pos = (0, 0)
+        self._m_since = None  # temporary; see _log_movement
 
     # -- capture callbacks ---------------------------------------------------
 
@@ -135,11 +137,7 @@ class HostSession:
         """Remote: move the tracked peer cursor, and watch for the return."""
         if not self.remote:
             return
-        self._deltas = getattr(self, "_deltas", 0) + 1
-        if self._deltas <= 20:
-            log.debug(
-                "delta %d: (%+d,%+d) from %s", self._deltas, dx, dy, self._peer_pos
-            )
+        self._log_movement(dx, dy)
         nx, ny = self._peer_pos[0] + dx, self._peer_pos[1] + dy
         hit = self.layout.map_exit(self.peer_id, nx, ny)
         if hit is not None and hit[0] == self.local_id:
@@ -152,6 +150,27 @@ class HostSession:
             return
         self._peer_pos = self.layout.clamp(self.peer_id, nx, ny)
         self._forward(protocol.pos(*self._peer_pos))
+
+    def _log_movement(self, dx: int, dy: int) -> None:
+        """Temporary instrumentation: how fast, and in how big a step.
+
+        Counting events alone cannot tell a rate ceiling from a mouse that
+        simply polls that often. The size of the steps can: if the biggest
+        delta grows when the hand moves faster, the host is delivering the
+        speed and the lag is downstream of it.
+        """
+        now = time.monotonic()
+        if self._m_since is None:
+            self._m_since, self._m_n, self._m_max, self._m_travel = now, 0, 0, 0
+        self._m_n += 1
+        self._m_max = max(self._m_max, abs(dx), abs(dy))
+        self._m_travel += abs(dx) + abs(dy)
+        if now - self._m_since >= 1.0:
+            log.debug(
+                "movement: %d events, biggest step %d px, %d px travelled",
+                self._m_n, self._m_max, self._m_travel,
+            )
+            self._m_since, self._m_n, self._m_max, self._m_travel = now, 0, 0, 0
 
     def on_click(self, button: str, pressed: bool) -> None:
         if self.remote:
