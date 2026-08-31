@@ -103,6 +103,26 @@ def _probe_pynput() -> str:
     return f"{mouse.Listener.__module__}, {keyboard.Listener.__module__}"
 
 
+def log_path() -> str:
+    """Where --debug writes its log.
+
+    A packaged app is launched by the desktop, not from a shell, so its
+    standard output goes nowhere. Redirecting it by launching the binary
+    by hand is not a workaround either: macOS then treats the launching
+    process as responsible for the app, and the accessibility grants that
+    let it inject anything at all stop applying.
+    """
+    base = (
+        os.path.expanduser("~/Library/Logs/MouseShare")
+        if sys.platform == "darwin"
+        else os.path.join(
+            os.environ.get("LOCALAPPDATA") or os.path.expanduser("~"), "MouseShare"
+        )
+    )
+    os.makedirs(base, exist_ok=True)
+    return os.path.join(base, "debug.log")
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(prog="mouseshare", description=(
         "Share one keyboard and mouse between this machine and another."
@@ -118,10 +138,15 @@ def main() -> int:
     if args.smoke:
         return smoke()
 
+    handlers = [logging.StreamHandler()]
+    if args.debug:
+        handlers.append(logging.FileHandler(log_path(), mode="w"))
+        print(f"debug log: {log_path()}", flush=True)
     logging.basicConfig(
         level=logging.DEBUG if args.debug else logging.INFO,
         format="%(asctime)s %(levelname)-7s %(message)s",
         datefmt="%H:%M:%S",
+        handlers=handlers,
     )
 
     import webview

@@ -4,6 +4,7 @@ No display, no second machine, no pynput -- the input layer is faked, so
 what is under test is the handshake, the role assignment and the token
 lifecycle: the parts that decide whether two real machines will ever talk.
 """
+import os
 import time
 
 import pytest
@@ -313,3 +314,15 @@ def test_an_unknown_device_claiming_to_be_paired_is_refused(tmp_path):
         client.close()
     finally:
         target.stop()
+
+
+def test_the_debug_log_goes_somewhere_a_packaged_app_can_write(tmp_path, monkeypatch):
+    """A desktop-launched app has no usable stdout, and launching it from a
+    shell to capture one costs it the accessibility grants it needs."""
+    from mouseshare.__main__ import log_path
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path))
+    path = log_path()
+    assert os.path.isdir(os.path.dirname(path))
+    open(path, "w").close()  # writable, which is the whole point
