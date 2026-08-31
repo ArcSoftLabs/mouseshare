@@ -50,6 +50,101 @@ def no_real_input(monkeypatch):
     monkeypatch.setattr(app_module, "InputCapture", FakeCapture)
 
 
+class RecordingInjector:
+    """Injection is not free: on a real Mac it is a Quartz event per call,
+    far slower than a gaming mouse reports."""
+
+    calls = None
+    delay = 0.0
+
+    @classmethod
+    def create(cls):
+        return cls()
+
+    def move_to(self, x, y):
+        time.sleep(self.delay)
+        RecordingInjector.calls.append(("move", x, y))
+
+    def click(self, button, pressed):
+        RecordingInjector.calls.append(("click", button, pressed))
+
+    def release_all(self):
+        RecordingInjector.calls.append(("release",))
+
+
+def a_client(tmp_path, monkeypatch, delay=0.0):
+    RecordingInjector.calls = []
+    RecordingInjector.delay = delay
+    monkeypatch.setattr(app_module, "Injector", RecordingInjector)
+    instance = make_app(tmp_path, "client", 0)
+    instance._peer_id, instance._peer_name = "host", "Host"
+    instance._become_client()
+    return instance
+
+
+def test_a_burst_of_positions_is_collapsed_before_it_is_injected(
+    tmp_path, monkeypatch
+):
+    """A position is absolute, so an older one says nothing a newer one
+    does not. Injected one at a time the backlog only grows, and the
+    cursor keeps gliding after the hand has stopped."""
+    instance = a_client(tmp_path, monkeypatch, delay=0.002)
+    for x in range(500):
+        instance._on_message({"t": "pos", "x": x, "y": 10})
+    instance._inbox.stop()
+
+    assert len(RecordingInjector.calls) < 100
+    assert RecordingInjector.calls[-1] == ("move", 499, 10)
+
+
+def test_a_click_still_lands_at_the_position_it_was_made_at(
+    tmp_path, monkeypatch
+):
+    """Collapsing must not reach across a click, or the button goes down
+    somewhere the user never pressed it."""
+    instance = a_client(tmp_path, monkeypatch)
+    instance._on_message({"t": "pos", "x": 5, "y": 5})
+    instance._on_message({"t": "click", "button": "left", "pressed": True})
+    instance._on_message({"t": "pos", "x": 9, "y": 9})
+    instance._inbox.stop()
+
+    assert RecordingInjector.calls == [
+        ("move", 5, 5), ("click", "left", True), ("move", 9, 9),
+    ]
+
+
+def test_a_failed_injection_does_not_stop_the_ones_after_it(
+    tmp_path, monkeypatch
+):
+    """One event the platform refuses is no reason to stop obeying the
+    host -- and the link itself is still perfectly healthy."""
+    instance = a_client(tmp_path, monkeypatch)
+    boom = {"t": "click", "button": "nonsense", "pressed": True}
+    monkeypatch.setattr(
+        RecordingInjector, "click",
+        lambda self, button, pressed: (_ for _ in ()).throw(ValueError(button)),
+    )
+    instance._on_message(boom)
+    instance._on_message({"t": "pos", "x": 7, "y": 7})
+    instance._inbox.stop()
+
+    assert ("move", 7, 7) in RecordingInjector.calls
+
+
+def test_nothing_is_injected_after_input_has_been_released(
+    tmp_path, monkeypatch
+):
+    """Stopping the queue drains it. Drained after the release, a held
+    key goes back down on a machine whose owner cannot then type their
+    way out of it."""
+    instance = a_client(tmp_path, monkeypatch, delay=0.002)
+    for x in range(200):
+        instance._on_message({"t": "pos", "x": x, "y": 1})
+    instance._do_teardown("peer went away")
+
+    assert RecordingInjector.calls[-1] == ("release",)
+
+
 def make_app(tmp_path, name, port):
     """An App with discovery disabled -- multicast is tested separately."""
     instance = App(lambda snapshot: None, cfg_path=tmp_path / f"{name}.json")

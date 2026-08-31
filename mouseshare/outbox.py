@@ -1,4 +1,10 @@
-"""Carries host input to the peer without blocking the input hook.
+"""A queue between something fast and something slow, used at both ends.
+
+On the host it stands between the input hook and the socket; on the
+client, between the socket and injection, which is slower still. Both
+have the same shape: a producer that must not be made to wait, and a
+consumer that cannot keep up with a mouse at full tilt.
+
 
 A Windows low-level hook callback runs on the thread that is delivering
 the event, and Windows silently stops calling a hook that takes too long.

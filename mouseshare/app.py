@@ -57,6 +57,7 @@ class App:
         self._client_session: Optional[ClientSession] = None
         self._capture: Optional[InputCapture] = None
         self._outbox: Optional[Outbox] = None
+        self._inbox: Optional[Outbox] = None
         self._injector: Optional[Injector] = None
 
         self.state = StateOwner(deliver, initial={
@@ -507,8 +508,10 @@ class App:
         elif t == "layout":
             self._peer_monitors = monitors.from_wire(self._peer_id, msg["monitors"])
             self.state.set(layout=self._layout_view(self._build_layout()))
-        elif self._client_session is not None:
-            self._client_session.on_message(msg)
+        elif self._inbox is not None:
+            # Not injected here: this is the socket reader, and injecting
+            # is far slower than a mouse reports. See _become_client.
+            self._inbox.put(msg)
 
     def _on_pair_err(self, msg: dict) -> None:
         reason = msg.get("reason", "Pairing failed.")
@@ -743,10 +746,30 @@ class App:
         )
         self._publish_peers()
 
+    def _inject(self, msg: dict) -> None:
+        """One refused event is not a reason to stop obeying the host.
+
+        The queue stops itself on error, which is right for sending -- a
+        failed send means the peer is gone -- but wrong here: the link is
+        still healthy, and a dead queue would leave the user's own
+        machine ignoring them with no sign of why.
+        """
+        try:
+            self._client_session.on_message(msg)
+        except Exception:  # noqa: BLE001 - see above
+            log.exception("could not inject %s", msg.get("t"))
+
     def _become_client(self) -> None:
         self._phase = "session"
         self._injector = Injector.create()
         self._client_session = ClientSession(self._injector)
+        # Injecting an event costs far more than receiving one, so the
+        # reader must not do it inline: the shortfall lands in the socket
+        # buffer, invisible to the host, and every stale position is then
+        # replayed in order -- the cursor arrives late and keeps moving
+        # after the hand has stopped. Queued here instead, consecutive
+        # positions collapse and only the newest one is ever injected.
+        self._inbox = Outbox(self._inject, on_error=lambda exc: None)
         self.state.set(
             screen="layout",
             pairing=None,
@@ -796,6 +819,12 @@ class App:
         with self._lock:
             if self._host is not None:
                 self._host.on_disconnect(reason)
+            # Before the release below, never after: stop() drains what is
+            # still queued, and a key press injected after release_all
+            # leaves a modifier held down on a machine whose owner then
+            # cannot type their way out of it.
+            if self._inbox is not None:
+                self._inbox.stop()
             if self._client_session is not None:
                 self._client_session.on_disconnect(reason)
             if self._capture is not None:
@@ -809,7 +838,7 @@ class App:
                 # so refusing it has to actually hang up.
                 self._server.disconnect(reason)
             self._host = self._client_session = self._capture = None
-            self._outbox = None
+            self._outbox = self._inbox = None
             self._client = self._injector = None
             self._role = ""
             self._phase = "idle"
