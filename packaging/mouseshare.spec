@@ -28,6 +28,10 @@ a = Analysis(
 )
 pyz = PYZ(a.pure, a.zipped_data)
 
+# Built by make_icons.py and committed, because the Windows runner has no
+# iconutil to produce the .icns and the Mac runner should not have to.
+ICONS = os.path.join(SPECPATH, "icons")
+
 if sys.platform == "darwin":
     exe = EXE(
         pyz,
@@ -46,6 +50,7 @@ if sys.platform == "darwin":
     app = BUNDLE(
         coll,
         name="MouseShare.app",
+        icon=os.path.join(ICONS, "MouseShare.icns"),
         # Stable, because macOS ties Accessibility and Input Monitoring
         # approval to the bundle identity. Changing it means re-approving.
         bundle_identifier="com.arcsoftlabs.mouseshare",
@@ -70,6 +75,7 @@ else:
         a.zipfiles,
         a.datas,
         name="mouseshare",
+        icon=os.path.join(ICONS, "MouseShare.ico"),
         debug=False,
         strip=False,
         upx=False,
