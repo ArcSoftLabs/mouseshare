@@ -6,7 +6,7 @@ here is about getting off that thread without losing anything that
 matters.
 """
 import threading
-import time
+import time  # noqa: F401 - used by the pacing tests below
 
 import pytest
 
@@ -160,3 +160,47 @@ def test_put_after_stop_is_ignored(rig):
     box.put(pos(1))
     time.sleep(0.05)
     assert recorder.sent == []
+
+
+def test_positions_are_paced_so_the_peer_is_not_buried():
+    """A gaming mouse reports a thousand times a second; a cursor needs
+    about a hundred. Sending every one buries the peer's reader, and the
+    surplus lands in its socket buffer where nothing can collapse it --
+    the cursor then keeps travelling after the hand has stopped."""
+    rec = Recorder()
+    box = Outbox(rec, on_error=lambda exc: None, min_pos_interval=0.05)
+    for x in range(200):
+        box.put({"t": "pos", "x": x, "y": 0})
+        time.sleep(0.001)
+    time.sleep(0.12)
+    box.stop()
+
+    assert len(rec.sent) < 12  # ~0.2s of movement at 20/s, not 200
+    assert rec.sent[-1]["x"] == 199  # and it ends where the hand did
+
+
+def test_pacing_sends_the_newest_position_not_the_one_it_first_saw():
+    rec = Recorder()
+    box = Outbox(rec, on_error=lambda exc: None, min_pos_interval=0.05)
+    box.put({"t": "pos", "x": 1, "y": 0})   # goes at once
+    time.sleep(0.01)
+    box.put({"t": "pos", "x": 2, "y": 0})   # held back
+    box.put({"t": "pos", "x": 3, "y": 0})   # replaces it while held
+    time.sleep(0.12)
+    box.stop()
+
+    assert [m["x"] for m in rec.sent] == [1, 3]
+
+
+def test_pacing_never_holds_back_a_click():
+    """Movement can wait a few milliseconds. A button cannot: it belongs
+    at the position it was pressed, and a release that waits is a button
+    left down."""
+    rec = Recorder()
+    box = Outbox(rec, on_error=lambda exc: None, min_pos_interval=0.05)
+    box.put({"t": "pos", "x": 1, "y": 0})
+    box.put({"t": "click", "button": "left", "pressed": True})
+    time.sleep(0.02)
+    box.stop()
+
+    assert [m["t"] for m in rec.sent] == ["pos", "click"]

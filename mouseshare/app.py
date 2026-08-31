@@ -25,6 +25,16 @@ from .outbox import Outbox
 from .session import ClientSession, HostSession
 from .state import StateOwner
 
+# How often the peer is told where the cursor is. A mouse reports about a
+# thousand times a second and a screen redraws sixty; everything between
+# those two numbers is work the far end does for nothing, and it does not
+# have it to spare. Measured on a Mac mini: at a thousand messages a
+# second the receiving process spent so long parsing them that injection
+# was starved down to eighty a second, and the surplus piled up in its
+# socket buffer -- the one queue in this system that cannot collapse --
+# so the cursor carried on moving after the hand had stopped.
+POSITION_INTERVAL = 1 / 120
+
 log = logging.getLogger("mouseshare")
 
 
@@ -713,6 +723,7 @@ class App:
         self._outbox = Outbox(
             self._send,
             on_error=lambda exc: self._on_disconnect(f"send failed: {exc}"),
+            min_pos_interval=POSITION_INTERVAL,
         )
         self._host = HostSession(
             layout=layout,

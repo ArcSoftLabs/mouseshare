@@ -37,9 +37,12 @@ class Outbox:
         self,
         send: Callable[[dict], None],
         on_error: Callable[[Exception], None],
+        min_pos_interval: float = 0.0,
     ):
         self._send = send
         self._on_error = on_error
+        self._min_pos_interval = min_pos_interval
+        self._last_pos = 0.0
         self._queue: List[dict] = []
         self._lock = threading.Lock()
         self._ready = threading.Condition(self._lock)
@@ -81,7 +84,31 @@ class Outbox:
                 self._ready.wait(0.2)
             if not self._queue:
                 return None
+            if self._queue[0].get("t") == "pos":
+                self._wait_for_the_slot()
+                if not self._queue:
+                    return None
+                self._last_pos = time.monotonic()
             return self._queue.pop(0)
+
+    def _wait_for_the_slot(self) -> None:
+        """Hold movement back to the pace the far end can actually take.
+
+        Caller holds the lock. Waiting here rather than after popping is
+        the point: positions arriving meanwhile replace the one at the
+        head, so what finally goes is the newest, and the surplus never
+        reaches the peer's socket buffer -- the one place in this system
+        where nothing can collapse it.
+
+        Only movement waits. A click or a key at the head goes straight
+        out, and a stop stops waiting, so the last position always
+        follows the hand that stopped.
+        """
+        due = self._last_pos + self._min_pos_interval
+        now = time.monotonic()
+        while self._running and now < due:
+            self._ready.wait(due - now)
+            now = time.monotonic()
 
     def _run(self) -> None:
         last_report = 0.0
