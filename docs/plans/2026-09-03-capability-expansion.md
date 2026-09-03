@@ -1,6 +1,6 @@
 # MouseShare capability expansion — implementation plan
 
-Date: 2026-09-03. Status: **Phase 1 output, awaiting confirmation.** Nothing below is
+Date: 2026-09-03. Status: **Confirmed 2026-09-03; Phase 2 in progress.** Nothing below is
 implemented. Source prompt: `ImprovedPrompts/2026-09-03-mouseshare-capability-expansion.md`
 (outside this repo).
 
@@ -97,9 +97,9 @@ inside the callback disables the tap. Plus `--debug` on the current build: `move
 3. **Client gets a send path** (an `Outbox` per link on both sides). Needed for
    clipboard, transfers, heartbeat acks, and a client-reported `edge` message.
 4. **Recovery guarantees** (independent of the root-cause fix): heartbeat every 2 s,
-   peer declared dead after 6 s → teardown → release; escape hotkey (proposed default
-   Ctrl+Alt+Shift+Esc, Cmd+Option+Shift+Esc on macOS; configurable) releases remote
-   mode on the host and returns the cursor to the host screen;
+   peer declared dead after 6 s → teardown → release; escape gesture (decided: tap Ctrl twice within
+   0.5 s, Cmd on macOS; changeable in the settings panel) releases remote mode on the
+   host and returns the cursor to the host screen;
    `stop_remote` warps the cursor back to a visible inset point; listener-thread death
    resets `suppressing`.
 5. **macOS capture rewrite:** decouple cursor with `CGAssociateMouseAndMouseCursorPosition(False)`
@@ -309,6 +309,6 @@ GUI launch via `open`); Windows runs via `py.exe`; Linux via WSLg.
 |---|---|---|
 | 1 | Implementer | **Decided:** Sol (Codex) implements, Fable plans and reviews |
 | 2 | File transfer | **Decided:** real cross-boundary drag and drop is the target; drop-zone only as evidenced fallback |
-| 3 | Linux: X11 only, Wayland documented as unsupported | Awaiting Benjamin |
+| 3 | Linux: X11 only, Wayland documented as unsupported | **Decided:** yes |
 | 4 | Device cap | **Decided:** 8 clients per host |
-| 5 | Escape hotkey default | Awaiting Benjamin (default proposed: Ctrl+Alt+Shift+Esc, Cmd+Option+Shift+Esc on Mac) |
+| 5 | Escape gesture | **Decided:** double-tap Ctrl (Cmd on Mac), configurable in settings |
