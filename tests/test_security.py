@@ -97,6 +97,18 @@ def test_an_input_message_out_of_phase_drops_the_connection(victim):
     client.close()
 
 
+def test_ping_during_pairing_is_ignored_without_advancing_or_dropping(victim):
+    client, got = attacker(victim)
+    client.send(protocol.pair_request("rogue", "Rogue"))
+    assert wait_for(lambda: got)
+    assert victim._phase == "challenged"
+    client.send(protocol.ping(1))
+    time.sleep(0.1)
+    assert victim._phase == "challenged"
+    assert victim._server.has_connection()
+    client.close()
+
+
 def test_three_wrong_codes_end_the_pairing(tmp_path):
     """The design says three attempts. The third wrong code is the third
     attempt, not a free one before the real limit."""

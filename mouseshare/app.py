@@ -33,6 +33,8 @@ from .state import StateOwner
 # socket buffer -- the one queue in this system that cannot collapse --
 # so the cursor carried on moving after the hand had stopped.
 POSITION_INTERVAL = 1 / 120
+HEARTBEAT_INTERVAL = 2.0
+HEARTBEAT_TIMEOUT = 6.0
 
 log = logging.getLogger("mouseshare")
 
@@ -56,6 +58,10 @@ class App:
         self._peer_id = ""
         self._peer_name = ""
         self._peer_monitors = []
+        self._peer_caps = frozenset()
+        self._negotiated_version = protocol.VERSION
+        self._last_received = time.monotonic()
+        self._heartbeat_stop = None
         self._nonce = ""
         self._role = ""
         self._phase = "idle"
@@ -413,7 +419,13 @@ class App:
         """Answer on the link that owns the handshake, never the other one."""
         link = self._client if self._active == "out" else self._server
         if link is not None:
+            if self._negotiated_version < 3 and "caps" in msg:
+                msg = {key: value for key, value in msg.items() if key != "caps"}
             link.send(msg)
+
+    @property
+    def negotiated_version(self) -> int:
+        return self._negotiated_version
 
     def _refuse(self, source: str, reason: str) -> None:
         """Hang up on one link without disturbing the live one."""
@@ -452,7 +464,10 @@ class App:
         "challenged": {"pair_proof", "auth"},
         "offered": {"pair_challenge", "pair_err"},
         "proved": {"pair_ok", "pair_err"},
-        "session": {"layout", "enter", "pos", "click", "scroll", "key", "leave"},
+        "session": {
+            "layout", "enter", "pos", "click", "scroll", "key", "leave",
+            "ping", "pong",
+        },
     }
 
     def _on_message(self, msg: dict, source: str = "in") -> None:
@@ -471,7 +486,15 @@ class App:
                 self._refuse(source, f"{t!r} on a link that owns nothing")
                 return
 
+            version = msg.get("v")
+            if isinstance(version, int):
+                self._negotiated_version = min(protocol.VERSION, version)
+            self._last_received = time.monotonic()
+
         if t not in self._ALLOWED.get(self._phase, set()):
+            if t in protocol.OPTIONAL_TYPES:
+                log.debug("ignoring optional message type %s", t)
+                return
             # Without this, an unsolicited pair_ok would start a session on
             # a socket that never proved anything, and the whole handshake
             # would be decoration.
@@ -525,8 +548,15 @@ class App:
         elif t == "pair_err":
             self._on_pair_err(msg)
         elif t == "layout":
+            self._set_peer_caps(msg)
             self._peer_monitors = monitors.from_wire(self._peer_id, msg["monitors"])
             self.state.set(layout=self._layout_view(self._build_layout()))
+            self._start_heartbeat()
+        elif t == "ping":
+            if "heartbeat" in self._peer_caps:
+                self._send(protocol.pong(msg["seq"]))
+        elif t == "pong":
+            return
         elif self._inbox is not None:
             # Not injected here: this is the socket reader, and injecting
             # is far slower than a mouse reports. See _become_client.
@@ -664,6 +694,7 @@ class App:
         """We are the host. Store the token, take the peer's monitors, and
         start driving."""
         self._peer_name = msg.get("name", "")
+        self._set_peer_caps(msg)
         self._peer_monitors = monitors.from_wire(self._peer_id, msg["monitors"])
         token = msg.get("token", "")
         saved = self.cfg.peers.get(self._peer_id)
@@ -765,6 +796,7 @@ class App:
                 layout.plane_rect(m.device_id, m.id),
             )
         self._send(protocol.layout(monitors.to_wire(self.monitors)))
+        self._start_heartbeat()
         self.state.set(
             screen="layout",
             pairing=None,
@@ -843,6 +875,49 @@ class App:
         )
         self._publish_peers()
 
+    def _set_peer_caps(self, msg: dict) -> None:
+        caps = msg.get("caps", [])
+        self._peer_caps = frozenset(cap for cap in caps if isinstance(cap, str)) \
+            if isinstance(caps, list) else frozenset()
+
+    def _start_heartbeat(self) -> None:
+        with self._lock:
+            if (
+                self._phase != "session"
+                or "heartbeat" not in self._peer_caps
+                or self._heartbeat_stop is not None
+            ):
+                return
+            stop = threading.Event()
+            self._heartbeat_stop = stop
+            self._last_received = time.monotonic()
+            threading.Thread(
+                target=self._heartbeat_loop,
+                args=(stop,),
+                name="mouseshare-heartbeat",
+                daemon=True,
+            ).start()
+
+    def _heartbeat_loop(self, stop: threading.Event) -> None:
+        seq = 0
+        try:
+            while not stop.wait(HEARTBEAT_INTERVAL):
+                if time.monotonic() - self._last_received > HEARTBEAT_TIMEOUT:
+                    with self._lock:
+                        if stop.is_set() or self._heartbeat_stop is not stop:
+                            return
+                    self._teardown("heartbeat")
+                    return
+                message = protocol.ping(seq)
+                seq += 1
+                if self._outbox is not None:
+                    self._outbox.put(message)
+                else:
+                    self._send(message)
+        except Exception:  # noqa: BLE001 - recovery worker must never escape
+            log.exception("heartbeat worker failed")
+            self._teardown("heartbeat")
+
     # -- teardown ------------------------------------------------------------
 
     def _on_disconnect(self, reason: str, source: str = "in") -> None:
@@ -879,6 +954,9 @@ class App:
 
     def _do_teardown(self, reason: str) -> None:
         with self._lock:
+            if self._heartbeat_stop is not None:
+                self._heartbeat_stop.set()
+                self._heartbeat_stop = None
             if self._host is not None:
                 self._host.on_disconnect(reason)
             # Before the release below, never after: stop() drains what is
@@ -907,4 +985,6 @@ class App:
             self._pending = None
             self._nonce = ""
             self._peer_monitors = []
+            self._peer_caps = frozenset()
+            self._negotiated_version = protocol.VERSION
             self._active = None

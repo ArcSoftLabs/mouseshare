@@ -312,3 +312,9 @@ GUI launch via `open`); Windows runs via `py.exe`; Linux via WSLg.
 | 3 | Linux: X11 only, Wayland documented as unsupported | **Decided:** yes |
 | 4 | Device cap | **Decided:** 8 clients per host |
 | 5 | Escape gesture | **Decided:** double-tap Ctrl (Cmd on Mac), configurable in settings |
+
+## Progress
+
+- [x] P1 — protocol v3 negotiation, capabilities, optional types, chunks, heartbeat.
+  The first outbound `pair_request` is v3 because the peer version is not known yet.
+  Interop with a real v2 peer therefore requires that peer to tolerate inbound `v:3`.

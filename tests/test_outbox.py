@@ -103,6 +103,19 @@ def test_movement_does_not_collapse_across_a_button_press(rig):
     assert recorder.sent == [pos(2), click, pos(4)]
 
 
+def test_ping_is_not_collapsed_with_position_traffic(rig):
+    box, recorder, _ = rig
+    recorder.gate = threading.Event()
+    box.put(pos(1))
+    box.put(pos(2))
+    box.put({"t": "ping", "seq": 7})
+    box.put(pos(3))
+    box.put(pos(4))
+    recorder.gate.set()
+    assert wait_for(lambda: len(recorder.sent) == 3)
+    assert recorder.sent == [pos(2), {"t": "ping", "seq": 7}, pos(4)]
+
+
 def test_keys_are_never_collapsed(rig):
     """A dropped release leaves a modifier stuck down on the other
     machine, which the user cannot type their way out of."""

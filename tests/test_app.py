@@ -4,13 +4,18 @@ No display, no second machine, no pynput -- the input layer is faked, so
 what is under test is the handshake, the role assignment and the token
 lifecycle: the parts that decide whether two real machines will ever talk.
 """
+import json
 import os
+import socket
+import threading
 import time
 
 import pytest
 
 from mouseshare import app as app_module
+from mouseshare import config, monitors
 from mouseshare.app import App
+from mouseshare.layout import Monitor
 
 
 @pytest.fixture(autouse=True)
@@ -20,6 +25,7 @@ def no_real_input(monkeypatch):
     class FakeInjector:
         def __init__(self, *a, **k):
             self.released = 0
+            self.held = set()
 
         @classmethod
         def create(cls):
@@ -27,6 +33,14 @@ def no_real_input(monkeypatch):
 
         def release_all(self):
             self.released += 1
+            self.held.clear()
+
+        def key(self, kind, value, pressed):
+            item = (kind, value)
+            if pressed:
+                self.held.add(item)
+            else:
+                self.held.discard(item)
 
         def __getattr__(self, _name):
             return lambda *a, **k: None
@@ -34,15 +48,18 @@ def no_real_input(monkeypatch):
     class FakeCapture:
         def __init__(self, **kwargs):
             self.started = False
+            self.suppressing = False
+            self.stop_remote_calls = 0
 
         def start(self):
             self.started = True
 
-        def start_remote(self):
-            pass
+        def start_remote(self, *_args):
+            self.suppressing = True
 
         def stop_remote(self):
-            pass
+            self.stop_remote_calls += 1
+            self.suppressing = False
 
         def stop(self):
             self.started = False
@@ -217,6 +234,144 @@ def test_the_right_code_pairs_both_machines(pair):
     assert connector.state.snapshot()["session"]["role"] == "host"
     assert wait_for(lambda: target.state.snapshot().get("session"))
     assert target.state.snapshot()["session"]["role"] == "client"
+    assert connector.negotiated_version == 3
+    assert connector._peer_caps == frozenset({"heartbeat"})
+    assert target._peer_caps == frozenset({"heartbeat"})
+
+
+def test_an_optional_ping_in_idle_is_ignored(tmp_path):
+    instance = make_app(tmp_path, "idle", 0)
+    instance._on_message({"t": "ping", "seq": 1, "v": 3})
+    assert instance._phase == "idle"
+    assert instance._active == "in"
+
+
+def test_v2_peer_has_no_heartbeat_and_can_still_move_cursor(tmp_path, monkeypatch):
+    monkeypatch.setattr(app_module, "HEARTBEAT_INTERVAL", 0.01)
+    instance = a_client(tmp_path, monkeypatch)
+    sent = []
+
+    class FakeLink:
+        def send(self, msg):
+            sent.append(msg)
+
+    instance._server = FakeLink()
+    instance._active = "in"
+    instance._on_message({"t": "layout", "monitors": [], "v": 2})
+    instance._on_message({"t": "pos", "x": 12, "y": 34, "v": 2})
+    time.sleep(0.03)
+    instance._inbox.stop()
+    assert instance.negotiated_version == 2
+    assert instance._heartbeat_stop is None
+    assert not any(msg["t"] == "ping" for msg in sent)
+    assert ("move", 12, 34) in RecordingInjector.calls
+
+
+def test_v2_speaking_peer_pairs_and_receives_cursor_movement(tmp_path):
+    peer_id = "v2-peer"
+    token = "cd" * 32
+    listener = socket.socket()
+    listener.bind(("127.0.0.1", 0))
+    listener.listen(1)
+    received = []
+    moved = threading.Event()
+
+    def send_v2(conn, msg):
+        conn.sendall(
+            json.dumps({**msg, "v": 2}, separators=(",", ":")).encode() + b"\n"
+        )
+
+    def peer():
+        conn, _ = listener.accept()
+        stream = conn.makefile("rb")
+        received.append(json.loads(stream.readline()))
+        send_v2(conn, {
+            "t": "pair_challenge", "nonce": "ab" * 16, "device_id": peer_id,
+        })
+        received.append(json.loads(stream.readline()))
+        send_v2(conn, {
+            "t": "pair_ok", "name": "Old peer",
+            "monitors": monitors.to_wire([
+                Monitor(peer_id, "0", 0, 0, 800, 600, primary=True)
+            ]),
+        })
+        received.append(json.loads(stream.readline()))
+        received.append(json.loads(stream.readline()))
+        moved.set()
+        conn.close()
+
+    threading.Thread(target=peer, daemon=True).start()
+    instance = make_app(tmp_path, "host", 0)
+    instance.cfg.peers[peer_id] = config.Peer(name="Old peer", token=token)
+    try:
+        instance.connect_manually("127.0.0.1", listener.getsockname()[1])
+        assert wait_for(lambda: instance.state.snapshot().get("session"))
+        instance._outbox.put({"t": "pos", "x": 22, "y": 33})
+        assert moved.wait(2.0)
+        assert instance.negotiated_version == 2
+        assert received[-1]["t"] == "pos"
+        assert received[-1]["v"] == 2
+        assert all("caps" not in msg for msg in received)
+    finally:
+        instance.stop()
+        listener.close()
+
+
+def test_heartbeat_timeout_tears_down_and_releases_host(pair, monkeypatch):
+    monkeypatch.setattr(app_module, "HEARTBEAT_INTERVAL", 0.01)
+    monkeypatch.setattr(app_module, "HEARTBEAT_TIMEOUT", 1.0)
+    connector, target = pair
+    connector.connect_manually("127.0.0.1", target._server.port)
+    pair_up(connector, target)
+    assert wait_for(lambda: connector._host is not None)
+
+    local = connector.monitors[0]
+    connector._host.on_move(local.x + local.w - 1, local.y + local.h // 2)
+    connector._host.on_key("special", "ctrl_l", True)
+    assert wait_for(lambda: ("special", "ctrl_l") in target._injector.held)
+    capture = connector._capture
+    target_injector = target._injector
+    assert capture.suppressing is True
+
+    # Leave the real socket open but make the peer stop all heartbeat traffic.
+    monkeypatch.setattr(target, "_send", lambda _message: None)
+    monkeypatch.setattr(app_module, "HEARTBEAT_TIMEOUT", 0.03)
+    connector._last_received = time.monotonic()
+    assert wait_for(lambda: connector._phase == "idle", timeout=1.0)
+    assert capture.stop_remote_calls == 1
+    assert capture.suppressing is False
+    assert wait_for(lambda: not target_injector.held)
+    assert target_injector.released >= 1
+    assert "heartbeat" in connector.state.snapshot()["error"]
+
+
+def test_stopped_heartbeat_cannot_tear_down_a_later_pairing(pair, monkeypatch):
+    monkeypatch.setattr(app_module, "HEARTBEAT_INTERVAL", 0.01)
+    connector, target = pair
+    connector.connect_manually("127.0.0.1", target._server.port)
+    pair_up(connector, target)
+    assert wait_for(lambda: connector._heartbeat_stop is not None)
+
+    calls = []
+    original = connector._teardown
+
+    def counted_teardown(reason):
+        calls.append(reason)
+        original(reason)
+
+    monkeypatch.setattr(connector, "_teardown", counted_teardown)
+    connector.cancel()
+    calls.clear()
+    time.sleep(3 * app_module.HEARTBEAT_INTERVAL)
+    assert calls == []
+
+    assert wait_for(lambda: target._phase == "idle")
+    connector.connect_manually("127.0.0.1", target._server.port)
+    assert wait_for(lambda: connector.state.snapshot().get("session"))
+    calls.clear()
+    time.sleep(3 * app_module.HEARTBEAT_INTERVAL)
+    assert connector.state.snapshot().get("session") is not None
+    assert calls == []
 
 
 def test_pairing_stores_the_same_token_on_both_machines(pair):

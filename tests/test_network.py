@@ -52,6 +52,23 @@ def test_server_sends_message_to_client():
         server.stop()
 
 
+def test_link_remembers_first_peer_version_and_replies_with_it():
+    received = []
+    server = MessageServer("127.0.0.1", 0, lambda m: server.send(p.leave()))
+    server.start()
+    raw = socket.create_connection(("127.0.0.1", server.port))
+    raw.settimeout(2.0)
+    try:
+        raw.sendall(b'{"t":"pair_request","device_id":"v2","name":"old","v":2}\n')
+        reply = raw.recv(4096)
+        received.append(p.decode(reply))
+        assert server.peer_version == 2
+        assert received == [{"t": "leave", "v": 2}]
+    finally:
+        raw.close()
+        server.stop()
+
+
 # -- disconnect events -------------------------------------------------------
 #
 # The host must un-suppress input the instant the peer goes away. v0.1 had

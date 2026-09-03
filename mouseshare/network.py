@@ -28,6 +28,7 @@ class _Link:
         # interleave and the peer drops a stream mid-session.
         self._send_lock = threading.Lock()
         self._closed = False
+        self.peer_version: Optional[int] = None
 
     def close(self, reason: str) -> bool:
         """Close and report. Returns False if someone else got here first."""
@@ -70,6 +71,10 @@ def _read_loop(link: _Link, on_message: MessageHandler) -> None:
             return
         try:
             for msg in buf.feed(data):
+                if link.peer_version is None:
+                    link.peer_version = msg["v"]
+                elif msg["v"] != link.peer_version:
+                    raise protocol.ProtocolError("protocol version changed mid-stream")
                 on_message(msg)
         except protocol.ProtocolError:
             # A desynchronised stream cannot be trusted to say when to stop
@@ -136,6 +141,11 @@ class MessageServer:
         with self._lock:
             return self._link is not None and not self._link.closed
 
+    @property
+    def peer_version(self) -> Optional[int]:
+        with self._lock:
+            return self._link.peer_version if self._link is not None else None
+
     def send(self, msg: dict) -> None:
         with self._lock:
             link = self._link
@@ -143,7 +153,8 @@ class MessageServer:
             return
         try:
             with link._send_lock:
-                link.sock.sendall(protocol.encode(msg))
+                version = link.peer_version or protocol.VERSION
+                link.sock.sendall(protocol.encode(msg, version=version))
         except OSError:
             link.close("error")
 
@@ -197,12 +208,17 @@ class MessageClient:
     def is_connected(self) -> bool:
         return self._link is not None and not self._link.closed
 
+    @property
+    def peer_version(self) -> Optional[int]:
+        return self._link.peer_version if self._link is not None else None
+
     def send(self, msg: dict) -> None:
         if self._link is None or self._link.closed:
             return
         try:
             with self._link._send_lock:
-                self._link.sock.sendall(protocol.encode(msg))
+                version = self._link.peer_version or protocol.VERSION
+                self._link.sock.sendall(protocol.encode(msg, version=version))
         except OSError:
             self._link.close("error")
 
