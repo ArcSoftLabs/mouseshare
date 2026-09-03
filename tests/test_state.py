@@ -28,6 +28,23 @@ def test_updates_after_ready_are_delivered():
     assert [d["screen"] for d in delivered] == ["layout"]
 
 
+def test_async_update_delivers_off_the_calling_thread():
+    calling_thread = threading.get_ident()
+    delivered_on = []
+    delivered = threading.Event()
+
+    def record(_snapshot):
+        delivered_on.append(threading.get_ident())
+        delivered.set()
+
+    owner = StateOwner(record, initial={"remote": False})
+    owner.mark_ready()
+    owner.set_async(remote=True)
+
+    assert delivered.wait(1)
+    assert delivered_on != [calling_thread]
+
+
 def test_every_delivery_carries_a_higher_revision_than_the_last():
     delivered = []
     owner = StateOwner(delivered.append, initial={"n": 0})
@@ -96,3 +113,31 @@ def test_snapshot_is_a_copy_so_callers_cannot_mutate_shared_state():
     snap = owner.snapshot()
     snap["peers"]["x"] = 1
     assert owner.snapshot()["peers"] == {}
+
+
+def test_concurrent_async_publishes_never_rewind():
+    """Two deliveries racing must land in revision order even when the
+    earlier one is slow inside the callback. (The check-then-lock window
+    the delivery lock now covers is too narrow to provoke from a test;
+    this pins the observable ordering contract.)"""
+    import time
+
+    delivered = []
+
+    def slow_then_fast(snapshot):
+        if snapshot["revision"] == 1:
+            time.sleep(0.1)
+        delivered.append(snapshot["revision"])
+
+    owner = StateOwner(slow_then_fast, initial={})
+    owner.mark_ready()
+    first = StateOwner.snapshot_at(1, {})
+    second = StateOwner.snapshot_at(2, {})
+    a = threading.Thread(target=owner.deliver, args=(first,))
+    b = threading.Thread(target=owner.deliver, args=(second,))
+    a.start()
+    time.sleep(0.02)
+    b.start()
+    a.join(2)
+    b.join(2)
+    assert delivered == [1, 2]

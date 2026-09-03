@@ -200,12 +200,32 @@ def test_the_cursor_is_clamped_onto_the_peer_screen():
 def test_a_disconnect_while_remote_releases_suppression():
     """The one failure the user cannot recover from inside the app: a dead
     keyboard means they cannot type to fix it."""
-    host, capture, _, _ = a_host()
+    host, capture, injector, _ = a_host()
     host.on_move(1919, 500)
     assert capture.suppressing is True
     host.on_disconnect("eof")
     assert capture.suppressing is False
     assert host.remote is False
+    assert ("move", 960, 540) in injector.calls
+
+
+def test_escape_while_remote_leaves_and_returns_near_the_modelled_peer_position():
+    host, capture, injector, send = a_host()
+    host.on_move(1919, 500)
+    host.on_delta(0, 100)
+    host.on_escape()
+    assert host.remote is False
+    assert capture.suppressing is False
+    assert kinds(send)[-1] == "leave"
+    assert injector.calls[-1] == ("move", 1917, 600)
+
+
+def test_escape_while_local_is_a_no_op():
+    host, capture, injector, send = a_host()
+    host.on_escape()
+    assert capture.stops == 0
+    assert injector.calls == []
+    assert send.sent == []
 
 
 def test_suppression_is_released_even_when_notifying_the_peer_fails():

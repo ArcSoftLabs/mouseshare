@@ -181,6 +181,43 @@ def wait_for(predicate, timeout=5.0):
     return False
 
 
+def test_setting_escape_key_rejects_invalid_values(tmp_path):
+    instance = make_app(tmp_path, "settings", 0)
+    with pytest.raises(ValueError):
+        instance.set_escape_key("caps_lock")
+
+
+def test_setting_escape_key_applies_to_a_running_capture(tmp_path):
+    instance = make_app(tmp_path, "settings", 0)
+    calls = []
+    instance._capture = type(
+        "Capture", (), {"set_escape_key": lambda self, value: calls.append(value)}
+    )()
+    snapshot = instance.set_escape_key("shift")
+    assert instance.cfg.escape_key == "shift"
+    assert snapshot["settings"]["escape_key"] == "shift"
+    assert calls == ["shift"]
+
+
+def test_remote_state_delivery_leaves_the_capture_callback_thread(tmp_path):
+    calling_thread = threading.get_ident()
+    delivered_on = []
+    delivered = threading.Event()
+
+    def record(snapshot):
+        if snapshot.get("session", {}).get("remote"):
+            delivered_on.append(threading.get_ident())
+            delivered.set()
+
+    instance = App(record, cfg_path=tmp_path / "state-thread.json")
+    instance.state.mark_ready()
+    instance.state.set(session={"role": "host", "remote": False})
+    instance._host_remote_changed(True)
+
+    assert delivered.wait(1)
+    assert delivered_on != [calling_thread]
+
+
 def start_listener(instance):
     from mouseshare.network import MessageServer
 

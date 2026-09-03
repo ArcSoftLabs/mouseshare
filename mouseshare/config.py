@@ -16,6 +16,11 @@ from typing import Dict, Tuple
 
 DEFAULT_PORT = 39471
 DEFAULT_PATH = Path.home() / ".mouseshare" / "config.json"
+ESCAPE_KEYS = frozenset({"ctrl", "cmd", "alt", "shift"})
+
+
+def default_escape_key() -> str:
+    return "cmd" if sys.platform == "darwin" else "ctrl"
 
 
 @dataclass
@@ -37,6 +42,7 @@ class Config:
     port: int = DEFAULT_PORT
     peers: Dict[str, Peer] = field(default_factory=dict)
     offsets: Dict[str, Tuple[int, int]] = field(default_factory=dict)
+    escape_key: str = field(default_factory=default_escape_key)
 
 
 def _defaults() -> Config:
@@ -58,6 +64,9 @@ def load(path: Path = DEFAULT_PATH) -> Config:
     cfg.device_id = raw.get("device_id") or cfg.device_id
     cfg.name = raw.get("name") or cfg.name
     cfg.port = raw.get("port", DEFAULT_PORT)
+    escape_key = raw.get("escape_key", cfg.escape_key)
+    if escape_key in ESCAPE_KEYS:
+        cfg.escape_key = escape_key
     for device_id, peer in (raw.get("peers") or {}).items():
         cfg.peers[device_id] = Peer(
             name=peer.get("name", ""),
@@ -95,6 +104,7 @@ def save(cfg: Config, path: Path = DEFAULT_PATH) -> None:
         "device_id": cfg.device_id,
         "name": cfg.name,
         "port": cfg.port,
+        "escape_key": cfg.escape_key,
         "peers": {
             device_id: {
                 "name": p.name,

@@ -46,6 +46,16 @@ function render(next) {
 
   $('#self-name').textContent = state.device.name;
   $('#self-port').textContent = 'port ' + state.device.port;
+  const status = $('#session-status');
+  const remote = state.session && state.session.role === 'host' && state.session.remote;
+  const escapeKey = state.session?.escape_key || state.settings?.escape_key || 'ctrl';
+  status.textContent = remote
+    ? `Double-tap ${escapeKey === 'cmd' ? 'Cmd' : escapeKey[0].toUpperCase() + escapeKey.slice(1)} to return`
+    : '';
+  status.hidden = !remote;
+  if (document.activeElement !== $('#escape-key')) {
+    $('#escape-key').value = state.settings.escape_key;
+  }
   if (document.activeElement !== $('#name-input')) {
     $('#name-input').value = state.device.name;
   }
@@ -278,6 +288,8 @@ function wire() {
     api().connect_manually($('#manual-address').value).then(render);
   $('#name-save').onclick = () =>
     api().rename($('#name-input').value).then(render);
+  $('#escape-key').onchange = () =>
+    api().set_escape_key($('#escape-key').value).then(render);
   $('#code-submit').onclick = submitCode;
 
   const boxes = $$('#code-entry input');

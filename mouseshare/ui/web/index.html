@@ -31,6 +31,7 @@
   <main>
     <div id="banner" class="banner" hidden></div>
     <div id="notice" class="banner info" hidden></div>
+    <div id="session-status" class="banner info" hidden></div>
 
     <!-- Devices ------------------------------------------------------- -->
     <section data-screen="devices">
@@ -106,6 +107,19 @@
           <button class="primary" id="name-save">Save</button>
         </div>
         <small>How this computer appears to others.</small>
+      </div>
+
+      <div class="panel">
+        <label for="escape-key">Escape key</label>
+        <div class="row">
+          <select id="escape-key">
+            <option value="ctrl">Ctrl</option>
+            <option value="cmd">Cmd</option>
+            <option value="alt">Alt</option>
+            <option value="shift">Shift</option>
+          </select>
+        </div>
+        <small>Double-tap this key to return the cursor to this machine.</small>
       </div>
 
       <div class="panel" id="permissions-panel" hidden>

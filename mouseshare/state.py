@@ -49,6 +49,19 @@ class StateOwner:
             snapshot = self.snapshot()
         self.deliver(snapshot)
 
+    def set_async(self, **fields: Any) -> None:
+        """Update immediately, but deliver away from a time-sensitive caller."""
+        with self._lock:
+            self._state.update(fields)
+            self._revision += 1
+            snapshot = self.snapshot()
+        threading.Thread(
+            target=self.deliver,
+            args=(snapshot,),
+            name="mouseshare-state-delivery",
+            daemon=True,
+        ).start()
+
     def mark_ready(self) -> dict:
         """Called once by the page when its listener exists. Returns the
         current state, so anything that changed while it was loading is
@@ -60,16 +73,19 @@ class StateOwner:
         return snapshot
 
     def deliver(self, snapshot: dict) -> None:
-        with self._lock:
-            if not self._ready:
-                return  # the page has no listener yet
-            if snapshot["revision"] <= self._last_delivered:
-                return  # a slower thread caught up; never rewind the UI
-            self._last_delivered = snapshot["revision"]
-        try:
-            with self._deliver_lock:
+        # The revision check and the delivery happen under one lock, so two
+        # concurrent publishers cannot both pass the check and then deliver
+        # in the opposite order.
+        with self._deliver_lock:
+            with self._lock:
+                if not self._ready:
+                    return  # the page has no listener yet
+                if snapshot["revision"] <= self._last_delivered:
+                    return  # a slower thread caught up; never rewind the UI
+                self._last_delivered = snapshot["revision"]
+            try:
                 self._deliver(snapshot)
-        except Exception as exc:  # noqa: BLE001
-            # A closed window invalidates the JS target mid-push. That is
-            # not a reason to take the session down with it.
-            log.debug("state delivery failed: %s", exc)
+            except Exception as exc:  # noqa: BLE001
+                # A closed window invalidates the JS target mid-push. That is
+                # not a reason to take the session down with it.
+                log.debug("state delivery failed: %s", exc)

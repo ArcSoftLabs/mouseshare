@@ -49,6 +49,7 @@ class HostSession:
         capture,
         injector,
         send: Callable[[dict], None],
+        on_remote_change: Callable[[bool], None] = lambda remote: None,
     ):
         self.layout = layout
         self.local_id = local_id
@@ -56,8 +57,10 @@ class HostSession:
         self.capture = capture
         self.injector = injector
         self._send = send
+        self._on_remote_change = on_remote_change
         self.remote = False
         self._peer_pos = (0, 0)
+        self._return_anchor = None
         self._m_since = None  # temporary; see _log_movement
 
     # -- capture callbacks ---------------------------------------------------
@@ -81,8 +84,11 @@ class HostSession:
         _, px, py = hit
         px, py = self.layout.clamp(self.peer_id, px, py)
         self.remote = True
+        self._on_remote_change(True)
         self._peer_pos = (px, py)
-        self.capture.start_remote(*self._park(x, y))
+        park = self._park(x, y)
+        self._return_anchor = park[0]
+        self.capture.start_remote(*park)
         log.info("cursor crossed to %s at (%d, %d)", self.peer_id, px, py)
         self._forward(protocol.enter(px, py))
 
@@ -144,9 +150,8 @@ class HostSession:
             _, hx, hy = hit
             hx, hy = self._inset(*self.layout.clamp(self.local_id, hx, hy))
             log.info("cursor returned to %s at (%d, %d)", self.local_id, hx, hy)
-            self._release()
+            self._release((hx, hy))
             self._forward(protocol.leave())
-            self.injector.move_to(hx, hy)
             return
         self._peer_pos = self.layout.clamp(self.peer_id, nx, ny)
         self._forward(protocol.pos(*self._peer_pos))
@@ -190,6 +195,28 @@ class HostSession:
         )
         self._forward(msg)
 
+    def on_escape(self) -> None:
+        """Return local control without forwarding the gesture."""
+        if not self.remote:
+            return
+        self._release(self._escape_target())
+        self._forward(protocol.leave())
+
+    def on_capture_lost(self) -> None:
+        """A dead listener is equivalent to the peer-side cursor leaving."""
+        if not self.remote:
+            return
+        self._release()
+        self._forward(protocol.leave())
+
+    def _escape_target(self) -> Tuple[int, int]:
+        try:
+            vx, vy = self.layout.to_plane(self.peer_id, *self._peer_pos)
+            point = self.layout.from_plane(self.local_id, vx, vy)
+            return self._inset(*self.layout.clamp(self.local_id, *point))
+        except (KeyError, ValueError):
+            return self._return_anchor
+
     # -- teardown ------------------------------------------------------------
 
     def on_disconnect(self, reason: str) -> None:
@@ -199,11 +226,15 @@ class HostSession:
     def stop(self) -> None:
         self._release()
 
-    def _release(self) -> None:
+    def _release(self, target=None) -> None:
         """Give local input back. Safe to call repeatedly."""
         if self.remote:
             self.remote = False
             self.capture.stop_remote()
+            point = target or self._return_anchor
+            if point is not None:
+                self.injector.move_to(*self._inset(*point))
+            self._on_remote_change(False)
 
     def _forward(self, msg: dict) -> None:
         """Send, and treat a failure as the peer being gone -- releasing

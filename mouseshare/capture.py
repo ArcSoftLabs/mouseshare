@@ -33,7 +33,10 @@ the cursor is only warped back to the anchor once it has wandered near
 the screen edge. See `_moved`.
 """
 import ctypes
+import logging
 import sys
+import threading
+import time
 from typing import Callable, Optional, Tuple
 
 WM_MOUSEMOVE = 0x0200
@@ -48,6 +51,48 @@ WM_CLICKS = {
 MOUSE_INJECTED_MASK = 0x01 | 0x02
 # LLKHF_INJECTED | LLKHF_LOWER_IL_INJECTED
 KEY_INJECTED_MASK = 0x10 | 0x02
+ESCAPE_WINDOW = 0.5
+log = logging.getLogger("mouseshare")
+
+
+class EscapeDetector:
+    """Recognise two clean modifier taps without depending on pynput."""
+
+    def __init__(self, key: str, window: float, clock=time.monotonic):
+        self.key = key
+        self.window = window
+        self._clock = clock
+        self._down = False
+        self._repeated = False
+        self._first_tap = None
+
+    def event(self, key: str, pressed: bool) -> bool:
+        matches = key == self.key or key in (f"{self.key}_l", f"{self.key}_r")
+        if not matches:
+            self._first_tap = None
+            self._down = False
+            self._repeated = False
+            return False
+        if pressed:
+            if self._down:
+                self._repeated = True
+            else:
+                self._down = True
+            return False
+        if not self._down:
+            self._first_tap = None
+            return False
+        self._down = False
+        if self._repeated:
+            self._repeated = False
+            self._first_tap = None
+            return False
+        now = self._clock()
+        if self._first_tap is not None and now - self._first_tap <= self.window:
+            self._first_tap = None
+            return True
+        self._first_tap = now
+        return False
 
 
 def key_to_wire(key, key_enum) -> Optional[Tuple[str, str]]:
@@ -74,12 +119,19 @@ class InputCapture:
         on_click: Callable[[str, bool], None],
         on_scroll: Callable[[int, int], None],
         on_key: Callable[[str, str, bool], None],
+        on_escape: Callable[[], None] = lambda: None,
+        on_capture_lost: Callable[[], None] = lambda: None,
+        escape_key: str = "ctrl",
     ):
         self._on_move = on_move
         self._on_delta = on_delta
         self._on_click = on_click
         self._on_scroll = on_scroll
         self._on_key = on_key
+        self._on_escape = on_escape
+        self._on_capture_lost = on_capture_lost
+        self._escape_key = escape_key
+        self._escape = EscapeDetector(escape_key, ESCAPE_WINDOW)
         self.suppressing = False
         self._anchor = (0, 0)
         self._limit = 1
@@ -87,6 +139,9 @@ class InputCapture:
         self._key_listener = None
         self._controller = None
         self._key_enum = None
+        self._consume_current = False
+        self._watchdog_stop = threading.Event()
+        self._watchdog = None
 
     # -- lifecycle -----------------------------------------------------------
 
@@ -97,6 +152,11 @@ class InputCapture:
         self._key_enum = keyboard.Key
         self._start_mouse(mouse)
         self._start_keyboard(keyboard)
+        self._start_watchdog()
+
+    def set_escape_key(self, key: str) -> None:
+        self._escape_key = key
+        self._escape = EscapeDetector(key, ESCAPE_WINDOW)
 
     def start_remote(self, anchor: Tuple[int, int], limit: int) -> None:
         """Suppress local input and report movement as deltas instead.
@@ -110,6 +170,7 @@ class InputCapture:
         """
         self._anchor = (int(anchor[0]), int(anchor[1]))
         self._limit = int(limit)
+        self._escape = EscapeDetector(self._escape_key, ESCAPE_WINDOW)
         self._controller.position = self._anchor
         self.suppressing = True
 
@@ -138,10 +199,45 @@ class InputCapture:
 
     def stop(self) -> None:
         self.suppressing = False
+        self._watchdog_stop.set()
         for listener in (self._mouse_listener, self._key_listener):
             if listener is not None:
                 listener.stop()
         self._mouse_listener = self._key_listener = None
+
+    def _start_watchdog(self, interval: float = 0.5) -> None:
+        if self._watchdog is not None and self._watchdog.is_alive():
+            return
+        self._watchdog_stop.clear()
+
+        def watch():
+            while not self._watchdog_stop.wait(interval):
+                listeners = (self._mouse_listener, self._key_listener)
+                dead = False
+                for listener in listeners:
+                    if listener is not None:
+                        try:
+                            listener.join(timeout=0)
+                        except Exception:  # noqa: BLE001 - listener reports its failure
+                            log.exception("input listener failed")
+                            dead = True
+                if dead or any(
+                    listener is not None and not listener.running
+                    for listener in listeners
+                ):
+                    was_suppressing = self.suppressing
+                    self.suppressing = False
+                    if was_suppressing:
+                        try:
+                            self._on_capture_lost()
+                        except Exception:  # noqa: BLE001 - watchdog must survive callback
+                            log.exception("capture-lost handler failed")
+                    return
+
+        self._watchdog = threading.Thread(
+            target=watch, name="mouseshare-capture-watchdog", daemon=True
+        )
+        self._watchdog.start()
 
     # -- mouse ---------------------------------------------------------------
 
@@ -206,6 +302,16 @@ class InputCapture:
     def _start_keyboard(self, keyboard) -> None:
         def emit(key, pressed):
             wire = key_to_wire(key, self._key_enum)
+            value = (
+                wire[1] if wire is not None
+                else getattr(key, "name", None) or getattr(key, "char", None) or ""
+            )
+            escaped = self._escape.event(value, pressed)
+            if escaped:
+                if sys.platform == "darwin":
+                    self._consume_current = True
+                self._on_escape()
+                return
             if wire is not None:
                 self._on_key(wire[0], wire[1], pressed)
 
@@ -239,7 +345,7 @@ class InputCapture:
 
             kwargs["win32_event_filter"] = win32_event_filter
         elif sys.platform == "darwin":
-            kwargs["darwin_intercept"] = self._darwin_intercept
+            kwargs["darwin_intercept"] = self._darwin_keyboard_intercept
 
         self._key_listener = keyboard.Listener(
             on_press=handle_press, on_release=handle_release, **kwargs
@@ -247,6 +353,12 @@ class InputCapture:
         self._key_listener.start()
 
     # -- shared --------------------------------------------------------------
+
+    def _darwin_keyboard_intercept(self, event_type, event):
+        if self._consume_current:
+            self._consume_current = False
+            return None
+        return self._darwin_intercept(event_type, event)
 
     def _darwin_intercept(self, event_type, event):
         if not self.suppressing:

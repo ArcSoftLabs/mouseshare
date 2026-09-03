@@ -93,6 +93,7 @@ class App:
             "error": "",
             # Something worth saying that is not something going wrong.
             "notice": "",
+            "settings": {"escape_key": self.cfg.escape_key},
         })
 
     # -- lifecycle -----------------------------------------------------------
@@ -266,6 +267,20 @@ class App:
         self.state.set(device={
             "id": self.cfg.device_id, "name": self.cfg.name, "port": self.cfg.port
         })
+        return self.state.snapshot()
+
+    def set_escape_key(self, value: str) -> dict:
+        if value not in config.ESCAPE_KEYS:
+            raise ValueError("escape key must be ctrl, cmd, alt, or shift")
+        self.cfg.escape_key = value
+        config.save(self.cfg, self._cfg_path)
+        if self._capture is not None:
+            self._capture.set_escape_key(value)
+        changes = {"settings": {"escape_key": value}}
+        current = self.state.snapshot().get("session")
+        if current and current.get("role") == "host":
+            changes["session"] = {**current, "escape_key": value}
+        self.state.set(**changes)
         return self.state.snapshot()
 
     def forget(self, peer_id: str) -> dict:
@@ -779,6 +794,7 @@ class App:
             capture=None,
             injector=self._injector,
             send=self._outbox.put,
+            on_remote_change=self._host_remote_changed,
         )
         self._capture = InputCapture(
             on_move=self._host.on_move,
@@ -786,6 +802,9 @@ class App:
             on_click=self._host.on_click,
             on_scroll=self._host.on_scroll,
             on_key=self._host.on_key,
+            on_escape=self._host.on_escape,
+            on_capture_lost=self._host.on_capture_lost,
+            escape_key=self.cfg.escape_key,
         )
         self._host.capture = self._capture
         self._capture.start()
@@ -803,11 +822,18 @@ class App:
             session={
                 "peer_id": self._peer_id, "peer_name": self._peer_name,
                 "role": "host",
+                "escape_key": self.cfg.escape_key,
+                "remote": False,
             },
             layout=self._layout_view(layout),
             error="",
         )
         self._publish_peers()
+
+    def _host_remote_changed(self, remote: bool) -> None:
+        current = self.state.snapshot().get("session")
+        if current and current.get("role") == "host":
+            self.state.set_async(session={**current, "remote": remote})
 
     def _inject(self, msg: dict) -> None:
         """One refused event is not a reason to stop obeying the host.

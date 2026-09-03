@@ -13,6 +13,13 @@ def test_a_fresh_install_generates_a_device_identity(tmp_path):
     assert cfg.port == config.DEFAULT_PORT
 
 
+def test_escape_key_defaults_to_cmd_on_macos_and_ctrl_elsewhere(tmp_path, monkeypatch):
+    monkeypatch.setattr(sys, "platform", "darwin")
+    assert config.load(tmp_path / "mac.json").escape_key == "cmd"
+    monkeypatch.setattr(sys, "platform", "win32")
+    assert config.load(tmp_path / "win.json").escape_key == "ctrl"
+
+
 def test_the_device_id_is_stable_across_restarts(tmp_path):
     path = tmp_path / "config.json"
     first = config.load(path)
@@ -27,6 +34,7 @@ def test_peers_round_trip_with_their_tokens_and_offsets(tmp_path):
         name="Benjamin's Mac", token="ab" * 32, last_address="192.168.1.20"
     )
     cfg.offsets["deadbeef"] = (1920, 0)
+    cfg.escape_key = "alt"
     config.save(cfg, path)
 
     loaded = config.load(path)
@@ -34,6 +42,7 @@ def test_peers_round_trip_with_their_tokens_and_offsets(tmp_path):
     assert loaded.peers["deadbeef"].token == "ab" * 32
     assert loaded.peers["deadbeef"].last_address == "192.168.1.20"
     assert loaded.offsets["deadbeef"] == (1920, 0)
+    assert loaded.escape_key == "alt"
 
 
 def test_a_corrupt_config_is_replaced_rather_than_crashing_the_app(tmp_path):
