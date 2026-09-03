@@ -3,12 +3,16 @@
 Each test connects a raw socket and sends something a well-behaved peer
 never would. None of them may end with a session.
 """
+import json
+import socket
+import threading
 import time
 
 import pytest
 
-from mouseshare import monitors, pairing, protocol
+from mouseshare import config, monitors, pairing, protocol
 from mouseshare.app import App
+from mouseshare.layout import Monitor
 from mouseshare.network import MessageClient, MessageServer
 
 from .test_app import no_real_input  # noqa: F401 - autouse fixture
@@ -42,6 +46,98 @@ def attacker(victim):
     received = []
     client.start_reader(received.append)
     return client, received
+
+
+def forged_pair_ok_server(version, pair_ok_hmac=None):
+    peer_id = "attacker"
+    listener = socket.socket()
+    listener.bind(("127.0.0.1", 0))
+    listener.listen(1)
+
+    def send(conn, message):
+        conn.sendall(
+            json.dumps({**message, "v": version}, separators=(",", ":")).encode()
+            + b"\n"
+        )
+
+    def answer():
+        conn, _ = listener.accept()
+        stream = conn.makefile("rb")
+        json.loads(stream.readline())
+        send(conn, protocol.pair_challenge("ab" * 16, peer_id))
+        json.loads(stream.readline())
+        response = protocol.pair_ok(
+            "Attacker",
+            monitors.to_wire([
+                Monitor(peer_id, "0", 0, 0, 800, 600, primary=True)
+            ]),
+        )
+        if pair_ok_hmac is not None:
+            response["hmac"] = pair_ok_hmac
+        send(conn, response)
+        time.sleep(0.2)
+        conn.close()
+
+    threading.Thread(target=answer, daemon=True).start()
+    return listener
+
+
+@pytest.mark.parametrize("forged_hmac", [None, "00" * 32])
+def test_forged_pair_ok_is_rejected_without_changing_the_token(
+    tmp_path, forged_hmac
+):
+    token = "cd" * 32
+    listener = forged_pair_ok_server(3, forged_hmac)
+    victim = App(lambda s: None, cfg_path=tmp_path / "connector.json")
+    victim.state.mark_ready()
+    victim.cfg.peers["attacker"] = config.Peer(name="Known peer", token=token)
+    try:
+        victim.connect_manually("127.0.0.1", listener.getsockname()[1])
+        assert wait_for(lambda: victim._phase == "idle")
+        assert victim.state.snapshot().get("session") is None
+        assert victim.cfg.peers["attacker"].token == token
+        assert "pair_ok not authenticated" in victim.state.snapshot()["error"]
+    finally:
+        victim.stop()
+        listener.close()
+
+
+@pytest.mark.parametrize("forged_hmac", [None, "00" * 32])
+def test_forged_pair_ok_does_not_save_a_fresh_token(tmp_path, forged_hmac):
+    listener = forged_pair_ok_server(3, forged_hmac)
+    victim = App(lambda s: None, cfg_path=tmp_path / "connector.json")
+    victim.state.mark_ready()
+    try:
+        victim.connect_manually("127.0.0.1", listener.getsockname()[1])
+        assert wait_for(lambda: victim._nonce)
+        victim.submit_code("123456")
+        assert wait_for(lambda: victim._phase == "idle")
+        assert victim.state.snapshot().get("session") is None
+        assert victim.cfg.peers == {}
+        assert "pair_ok not authenticated" in victim.state.snapshot()["error"]
+    finally:
+        victim.stop()
+        listener.close()
+
+
+def test_v2_pair_ok_without_hmac_is_accepted_with_a_warning(
+    tmp_path, caplog
+):
+    token = "cd" * 32
+    listener = forged_pair_ok_server(2)
+    victim = App(lambda s: None, cfg_path=tmp_path / "connector.json")
+    victim.state.mark_ready()
+    victim.cfg.peers["attacker"] = config.Peer(name="Known peer", token=token)
+    try:
+        with caplog.at_level("WARNING", logger="mouseshare"):
+            victim.connect_manually("127.0.0.1", listener.getsockname()[1])
+            assert wait_for(lambda: victim.state.snapshot().get("session"))
+        session = victim.state.snapshot()["session"]
+        assert session["unauthenticated_peer"] is True
+        assert "peer Attacker does not authenticate pair_ok (protocol v2)" in caplog.text
+    finally:
+        victim.stop()
+        listener.close()
 
 
 def test_an_unsolicited_pair_ok_does_not_start_a_session(victim):

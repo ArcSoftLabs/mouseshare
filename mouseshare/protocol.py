@@ -54,13 +54,17 @@ def auth(device_id: str, mac: str) -> dict:
     return {"t": "auth", "device_id": device_id, "hmac": mac}
 
 
-def pair_ok(name: str, monitors: list, token: str = "", caps=None) -> dict:
+def pair_ok(
+    name: str, monitors: list, token: str = "", caps=None, hmac: str = ""
+) -> dict:
     msg = {
         "t": "pair_ok", "name": name, "monitors": monitors,
         "caps": CAPABILITIES if caps is None else list(caps),
     }
     if token:
         msg["token"] = token
+    if hmac:
+        msg["hmac"] = hmac
     return msg
 
 

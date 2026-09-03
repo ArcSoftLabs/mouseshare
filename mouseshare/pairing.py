@@ -59,6 +59,20 @@ def verify(secret: bytes, mac: str, nonce: str, initiator_id: str, target_id: st
     return hmac.compare_digest(proof(secret, nonce, initiator_id, target_id), mac)
 
 
+def ok_proof(secret: bytes, nonce: str, target_id: str, initiator_id: str) -> str:
+    """Prove the target accepted this specific pairing transcript."""
+    transcript = f"{nonce}|{target_id}|{initiator_id}|ok".encode("ascii")
+    return hmac.new(secret, transcript, sha256).hexdigest()
+
+
+def verify_ok(
+    secret: bytes, mac: str, nonce: str, target_id: str, initiator_id: str
+) -> bool:
+    return hmac.compare_digest(
+        ok_proof(secret, nonce, target_id, initiator_id), mac
+    )
+
+
 class PendingPairing:
     """Target-side state while a code is on screen waiting to be typed."""
 

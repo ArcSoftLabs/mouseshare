@@ -67,6 +67,28 @@ def test_reconnect_proof_uses_the_token_bytes_as_the_key():
     assert not pairing.verify(bytes.fromhex(pairing.make_token()), mac, nonce, A, B)
 
 
+def test_ok_proof_is_distinct_from_the_initiators_proof_and_verifies():
+    nonce = pairing.make_nonce()
+    secret = b"123456"
+    initiator_mac = pairing.proof(secret, nonce, A, B)
+    target_mac = pairing.ok_proof(secret, nonce, B, A)
+
+    assert target_mac != initiator_mac
+    assert pairing.verify_ok(secret, target_mac, nonce, B, A)
+    assert not pairing.verify_ok(secret, initiator_mac, nonce, B, A)
+
+
+def test_ok_proof_rejects_the_wrong_key_nonce_or_device_ids():
+    nonce = pairing.make_nonce()
+    secret = b"123456"
+    mac = pairing.ok_proof(secret, nonce, B, A)
+
+    assert not pairing.verify_ok(b"654321", mac, nonce, B, A)
+    assert not pairing.verify_ok(secret, mac, pairing.make_nonce(), B, A)
+    assert not pairing.verify_ok(secret, mac, nonce, A, B)
+    assert not pairing.verify_ok(secret, mac, nonce, B, C)
+
+
 # -- the pending-pairing state machine ---------------------------------------
 
 

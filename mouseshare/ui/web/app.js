@@ -48,11 +48,12 @@ function render(next) {
   $('#self-port').textContent = 'port ' + state.device.port;
   const status = $('#session-status');
   const remote = state.session && state.session.role === 'host' && state.session.remote;
+  const unauthenticated = state.session?.unauthenticated_peer;
   const escapeKey = state.session?.escape_key || state.settings?.escape_key || 'ctrl';
   status.textContent = remote
     ? `Double-tap ${escapeKey === 'cmd' ? 'Cmd' : escapeKey[0].toUpperCase() + escapeKey.slice(1)} to return`
-    : '';
-  status.hidden = !remote;
+    : unauthenticated ? 'Warning: this protocol v2 peer cannot authenticate its response' : '';
+  status.hidden = !remote && !unauthenticated;
   if (document.activeElement !== $('#escape-key')) {
     $('#escape-key').value = state.settings.escape_key;
   }

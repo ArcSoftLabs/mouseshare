@@ -723,9 +723,21 @@ def test_being_connected_to_does_not_erase_the_address_we_had(
     )
     instance._peer_id = "mac"
     instance._client = None  # they dialled us, so we have no outbound socket
+    instance._nonce = "ab" * 16
+    instance._pair_secret = bytes.fromhex(instance.cfg.peers["mac"].token)
     # What is stored is the point here, not the session that follows it.
     monkeypatch.setattr(instance, "_become_host", lambda: None)
-    instance._on_pair_ok({"name": "Mac", "monitors": [], "token": "cd" * 32})
+    instance._on_pair_ok({
+        "name": "Mac",
+        "monitors": [],
+        "token": "cd" * 32,
+        "hmac": app_module.pairing.ok_proof(
+            instance._pair_secret,
+            instance._nonce,
+            "mac",
+            instance.cfg.device_id,
+        ),
+    })
 
     assert instance.cfg.peers["mac"].last_address == "192.168.1.50"
     assert instance.cfg.peers["mac"].last_port == 39471

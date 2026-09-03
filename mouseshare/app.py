@@ -63,6 +63,8 @@ class App:
         self._last_received = time.monotonic()
         self._heartbeat_stop = None
         self._nonce = ""
+        self._pair_secret = b""
+        self._unauthenticated_peer = False
         self._role = ""
         self._phase = "idle"
         # Which link owns the handshake: "in", "out", or nobody yet.
@@ -213,6 +215,7 @@ class App:
         mac = pairing.proof(
             code.encode("ascii"), self._nonce, self.cfg.device_id, self._peer_id
         )
+        self._pair_secret = code.encode("ascii")
         self._send(protocol.pair_proof(mac))
         self._phase = "proved"
         return self.state.snapshot()
@@ -417,6 +420,8 @@ class App:
         self._peer_id = peer_id
         self._role = "host"
         self._phase = "offered"
+        self._pair_secret = b""
+        self._unauthenticated_peer = False
         client.start_reader(
             lambda m: self._on_message(m, "out"),
             lambda r: self._on_disconnect(r, "out"),
@@ -435,6 +440,12 @@ class App:
         if link is not None:
             if self._negotiated_version < 3 and "caps" in msg:
                 msg = {key: value for key, value in msg.items() if key != "caps"}
+            if (
+                self._negotiated_version < 3
+                and msg.get("t") == "pair_ok"
+                and "hmac" in msg
+            ):
+                msg = {key: value for key, value in msg.items() if key != "hmac"}
             link.send(msg)
 
     @property
@@ -462,6 +473,8 @@ class App:
         self._role = ""
         self._phase = "idle"
         self._nonce = ""
+        self._pair_secret = b""
+        self._unauthenticated_peer = False
 
     # -- protocol ------------------------------------------------------------
 
@@ -656,8 +669,9 @@ class App:
         self._peer_id = msg.get("device_id") or self._peer_id
         saved = self.cfg.peers.get(self._peer_id)
         if saved and saved.token:
+            self._pair_secret = bytes.fromhex(saved.token)
             mac = pairing.proof(
-                bytes.fromhex(saved.token), self._nonce,
+                self._pair_secret, self._nonce,
                 self.cfg.device_id, self._peer_id,
             )
             self._send(protocol.auth(self.cfg.device_id, mac))
@@ -680,6 +694,7 @@ class App:
         if not ok:
             self._send(protocol.pair_err("wrong code"))
             return
+        secret = self._pending.code.encode("ascii")
         token = pairing.make_token()
         self.cfg.peers[self._peer_id] = config.Peer(
             name=self._peer_name, token=token
@@ -687,7 +702,12 @@ class App:
         config.save(self.cfg, self._cfg_path)
         self._pending = None
         self._send(protocol.pair_ok(
-            self.cfg.name, monitors.to_wire(self.monitors), token
+            self.cfg.name,
+            monitors.to_wire(self.monitors),
+            token,
+            hmac=pairing.ok_proof(
+                secret, self._nonce, self.cfg.device_id, self._peer_id
+            ),
         ))
         self._become_client()
 
@@ -705,13 +725,38 @@ class App:
             self._send(protocol.pair_err("authentication failed"))
             self._teardown("authentication failed")
             return
-        self._send(protocol.pair_ok(self.cfg.name, monitors.to_wire(self.monitors)))
+        self._send(protocol.pair_ok(
+            self.cfg.name,
+            monitors.to_wire(self.monitors),
+            hmac=pairing.ok_proof(
+                bytes.fromhex(saved.token), self._nonce,
+                self.cfg.device_id, msg["device_id"],
+            ),
+        ))
         self._become_client()
 
     def _on_pair_ok(self, msg: dict) -> None:
         """We are the host. Store the token, take the peer's monitors, and
         start driving."""
-        self._peer_name = msg.get("name", "")
+        peer_name = msg.get("name", "")
+        mac = msg.get("hmac", "")
+        if self._negotiated_version == 2 and not mac:
+            log.warning(
+                "peer %s does not authenticate pair_ok (protocol v2)",
+                peer_name or self._peer_id,
+            )
+            self._unauthenticated_peer = True
+        elif not isinstance(mac, str) or not pairing.verify_ok(
+            self._pair_secret, mac, self._nonce,
+            self._peer_id, self.cfg.device_id,
+        ):
+            self._teardown("pair_ok not authenticated")
+            return
+        else:
+            self._unauthenticated_peer = False
+        self._pair_secret = b""
+
+        self._peer_name = peer_name
         self._set_peer_caps(msg)
         self._peer_monitors = monitors.from_wire(self._peer_id, msg["monitors"])
         token = msg.get("token", "")
@@ -827,6 +872,7 @@ class App:
                 "role": "host",
                 "escape_key": self.cfg.escape_key,
                 "remote": False,
+                "unauthenticated_peer": self._unauthenticated_peer,
             },
             layout=self._layout_view(layout),
             error="",
@@ -896,6 +942,7 @@ class App:
             session={
                 "peer_id": self._peer_id, "peer_name": self._peer_name,
                 "role": "client",
+                "unauthenticated_peer": False,
             },
             error="",
         )
@@ -1017,6 +1064,8 @@ class App:
             self._phase = "idle"
             self._pending = None
             self._nonce = ""
+            self._pair_secret = b""
+            self._unauthenticated_peer = False
             self._peer_monitors = []
             self._peer_caps = frozenset()
             self._negotiated_version = protocol.VERSION
