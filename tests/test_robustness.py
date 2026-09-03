@@ -2,7 +2,6 @@
 only show up under load.
 """
 import threading
-import time
 
 from mouseshare import protocol, session
 from mouseshare.inject import Injector

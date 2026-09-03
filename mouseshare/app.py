@@ -15,12 +15,11 @@ import threading
 import time
 from typing import Optional
 
-from . import config, discovery, monitors, pairing, protocol
+from . import config, discovery, monitors, pairing, protocol, session
 from .capture import InputCapture
 from .inject import Injector
 from .layout import Layout
 from .network import MessageClient, MessageServer
-from . import session
 from .outbox import Outbox
 from .session import ClientSession, HostSession
 from .state import StateOwner

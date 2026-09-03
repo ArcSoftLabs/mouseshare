@@ -7,8 +7,7 @@ import time
 
 import pytest
 
-from mouseshare import app as app_module
-from mouseshare import config, monitors, pairing, protocol
+from mouseshare import monitors, pairing, protocol
 from mouseshare.app import App
 from mouseshare.network import MessageClient, MessageServer
 
@@ -140,7 +139,7 @@ def test_an_inbound_socket_cannot_hijack_an_outbound_handshake(tmp_path):
     unauthenticated inbound socket can send one and take the session.
     """
     from mouseshare import config as cfgmod
-    from mouseshare import monitors, pairing, protocol
+    from mouseshare import monitors, protocol
     from mouseshare.network import MessageClient, MessageServer
 
     peer_id = "peerpeerpeer"

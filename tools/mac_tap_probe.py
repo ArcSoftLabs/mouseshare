@@ -111,7 +111,8 @@ class Phase:
     def run(self, instruction):
         print("\n=== %s ===\n%s" % (self.name, instruction))
         for n in (3, 2, 1):
-            print("starting in %d..." % n, flush=True); time.sleep(1)
+            print("starting in %d..." % n, flush=True)
+            time.sleep(1)
         Quartz.CGWarpMouseCursorPosition(self.anchor)
         time.sleep(0.3)  # the warp briefly suppresses hardware events
         # A tap is live from creation; service it at once or it times out.

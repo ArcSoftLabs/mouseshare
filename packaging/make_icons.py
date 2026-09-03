@@ -178,7 +178,7 @@ def main() -> int:
     print(f"  MouseShare.ico      ({len(ICO_SIZES)} sizes, for Windows)")
     print(f"  MouseShare.iconset/ ({len(ICNS_NAMES)} files; iconutil turns "
           f"this into MouseShare.icns on a Mac)")
-    print(f"  icon.png            (1024, for anywhere else)")
+    print("  icon.png            (1024, for anywhere else)")
     return 0
 
 

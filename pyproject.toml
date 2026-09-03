@@ -16,6 +16,12 @@ dependencies = [
   "screeninfo>=0.8",
 ]
 
+[project.optional-dependencies]
+dev = [
+  "pytest",
+  "ruff==0.16.6",
+]
+
 [project.scripts]
 mouseshare = "mouseshare.__main__:main"
 
@@ -24,3 +30,12 @@ packages = ["mouseshare", "mouseshare.ui"]
 
 [tool.setuptools.package-data]
 "mouseshare.ui" = ["web/*"]
+
+[tool.ruff]
+target-version = "py312"
+line-length = 100
+exclude = ["docs", "packaging/build", "packaging/dist"]
+
+[tool.ruff.lint]
+# Explicit so the result does not change with ruff's default rule set.
+select = ["E4", "E7", "E9", "F", "I"]

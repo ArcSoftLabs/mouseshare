@@ -18,7 +18,8 @@ jobs:
       # The core is deliberately importable without a display, so the whole
       # suite runs here. Capture, injection and monitor enumeration are
       # verified by hand on the real machines -- see the release checklist.
-      - run: pip install pytest zeroconf screeninfo
+      - run: pip install pytest ruff==0.16.6 zeroconf screeninfo
+      - run: ruff check mouseshare tests packaging tools
       - run: python -m pytest tests -v
 
   package:
