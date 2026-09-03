@@ -6,6 +6,8 @@ the peer goes away, and it can only do that if it is told. The callback
 fires exactly once per connection, whatever ends it -- EOF, a read or write
 error, a protocol violation, or local shutdown.
 """
+import logging
+import queue
 import socket
 import threading
 from typing import Callable, Optional
@@ -14,6 +16,8 @@ from . import protocol
 
 MessageHandler = Callable[[dict], None]
 DisconnectHandler = Callable[[str], None]
+log = logging.getLogger("mouseshare")
+INBOUND_QUEUE_SIZE = 64
 
 
 class _Link:
@@ -29,6 +33,88 @@ class _Link:
         self._send_lock = threading.Lock()
         self._closed = False
         self.peer_version: Optional[int] = None
+        self._inbound = queue.Queue(maxsize=INBOUND_QUEUE_SIZE)
+        self._worker_stop = threading.Event()
+        self._worker = None
+        self._reader = None
+
+    def start_handler(self, on_message: MessageHandler) -> None:
+        self._worker = threading.Thread(
+            target=self._handle_loop,
+            args=(on_message,),
+            name="mouseshare-inbound",
+            daemon=True,
+        )
+        self._worker.start()
+
+    def enqueue(self, msg: dict) -> bool:
+        """Queue in wire order, discarding only obsolete positions."""
+        while not self._worker_stop.is_set():
+            if msg.get("t") == "pos":
+                with self._inbound.mutex:
+                    if (
+                        self._inbound.queue
+                        and self._inbound.queue[-1].get("t") == "pos"
+                    ):
+                        self._inbound.queue[-1] = msg
+                        return True
+            try:
+                self._inbound.put(msg, timeout=0.05)
+                return True
+            except queue.Full:
+                with self._inbound.not_full:
+                    oldest_pos = next(
+                        (i for i, queued in enumerate(self._inbound.queue)
+                         if queued.get("t") == "pos"),
+                        None,
+                    )
+                    if oldest_pos is not None:
+                        del self._inbound.queue[oldest_pos]
+                        self._inbound.unfinished_tasks -= 1
+                        self._inbound.not_full.notify()
+        return False
+
+    def _handle_loop(self, on_message: MessageHandler) -> None:
+        while not self._worker_stop.is_set():
+            try:
+                msg = self._inbound.get(timeout=0.05)
+            except queue.Empty:
+                continue
+            if self._worker_stop.is_set():
+                self._inbound.task_done()
+                return
+            try:
+                on_message(msg)
+            except protocol.ProtocolError:
+                self.close("protocol")
+                return
+            except Exception as exc:  # noqa: BLE001 - isolate application handler
+                log.warning("message handler failed (%s)", type(exc).__name__)
+            finally:
+                self._inbound.task_done()
+
+    def finish(self) -> None:
+        """Deliver complete frames received before an orderly peer EOF."""
+        self._inbound.join()
+        self.close("eof")
+
+    def stop_inbound(self) -> None:
+        """Drop queued inbound messages and wait for the handler to stop."""
+        self._worker_stop.set()
+        with self._inbound.not_full:
+            discarded = len(self._inbound.queue)
+            self._inbound.queue.clear()
+            self._inbound.unfinished_tasks -= discarded
+            if self._inbound.unfinished_tasks == 0:
+                self._inbound.all_tasks_done.notify_all()
+            self._inbound.not_full.notify_all()
+        if self._worker is not None and self._worker is not threading.current_thread():
+            try:
+                self._worker.join(timeout=2.0)
+            except RuntimeError:
+                # close raced the tiny interval between assigning the
+                # Thread object and start() marking it started.
+                pass
 
     def close(self, reason: str) -> bool:
         """Close and report. Returns False if someone else got here first."""
@@ -36,6 +122,7 @@ class _Link:
             if self._closed:
                 return False
             self._closed = True
+        self.stop_inbound()
         # shutdown() before close(): close() alone does not tear down the
         # connection while another thread is blocked in recv() on this
         # socket, so the peer would never see EOF and the reader would
@@ -67,7 +154,7 @@ def _read_loop(link: _Link, on_message: MessageHandler) -> None:
             link.close("error")
             return
         if not data:
-            link.close("eof")
+            link.finish()
             return
         try:
             for msg in buf.feed(data):
@@ -75,7 +162,8 @@ def _read_loop(link: _Link, on_message: MessageHandler) -> None:
                     link.peer_version = msg["v"]
                 elif msg["v"] != link.peer_version:
                     raise protocol.ProtocolError("protocol version changed mid-stream")
-                on_message(msg)
+                if not link.enqueue(msg):
+                    return
         except protocol.ProtocolError:
             # A desynchronised stream cannot be trusted to say when to stop
             # suppressing input, so it ends the connection.
@@ -127,9 +215,11 @@ class MessageServer:
                 except OSError:
                     pass
                 continue
-            threading.Thread(
+            link.start_handler(self._on_message)
+            link._reader = threading.Thread(
                 target=_read_loop, args=(link, self._on_message), daemon=True
-            ).start()
+            )
+            link._reader.start()
 
     def _fire_disconnect(self, reason: str) -> None:
         with self._lock:
@@ -169,6 +259,12 @@ class MessageServer:
         if link is not None:
             link.close(reason)
 
+    def stop_inbound(self) -> None:
+        with self._lock:
+            link = self._link
+        if link is not None:
+            link.stop_inbound()
+
     def stop(self) -> None:
         self._running = False
         with self._lock:
@@ -201,9 +297,11 @@ class MessageClient:
     ) -> None:
         assert self._link is not None
         self._link._on_disconnect = on_disconnect
-        threading.Thread(
+        self._link.start_handler(on_message)
+        self._link._reader = threading.Thread(
             target=_read_loop, args=(self._link, on_message), daemon=True
-        ).start()
+        )
+        self._link._reader.start()
 
     def is_connected(self) -> bool:
         return self._link is not None and not self._link.closed
@@ -226,3 +324,7 @@ class MessageClient:
         if self._link is not None:
             self._link.close("shutdown")
             self._link = None
+
+    def stop_inbound(self) -> None:
+        if self._link is not None:
+            self._link.stop_inbound()

@@ -17,7 +17,7 @@ VERSION = 3
 MIN_VERSION = 2
 MAX_LINE = 64 * 1024
 CAPABILITIES = ["heartbeat"]
-OPTIONAL_TYPES = {"ping", "pong"}
+OPTIONAL_TYPES = {"ping", "pong", "edge"}
 
 
 class ProtocolError(Exception):
@@ -114,6 +114,10 @@ def ping(seq: int) -> dict:
 
 def pong(seq: int) -> dict:
     return {"t": "pong", "seq": seq}
+
+
+def edge(x: int, y: int) -> dict:
+    return {"t": "edge", "x": x, "y": y}
 
 
 def register_optional_type(kind: str) -> None:

@@ -186,3 +186,82 @@ def test_client_reports_disconnect_when_the_server_goes_away():
     assert wait_for(lambda: events != [])
     assert events == ["eof"]
     client.close()
+
+
+def test_slow_handler_does_not_stall_receipt_of_a_second_message():
+    first_started = threading.Event()
+    release = threading.Event()
+    server = MessageServer(
+        "127.0.0.1", 0,
+        lambda msg: (first_started.set(), release.wait(2.0)),
+    )
+    server.start()
+    client = MessageClient("127.0.0.1", server.port)
+    client.connect()
+    try:
+        client.send(p.pos(1, 1))
+        assert first_started.wait(2.0)
+        client.send(p.leave())
+        assert wait_for(lambda: server._link._inbound.qsize() == 1)
+    finally:
+        release.set()
+        client.close()
+        server.stop()
+
+
+def test_reader_thread_ends_after_close():
+    server = MessageServer("127.0.0.1", 0, lambda _msg: None)
+    server.start()
+    client = MessageClient("127.0.0.1", server.port)
+    client.connect()
+    client.start_reader(lambda _msg: None)
+    link = client._link
+
+    client.close()
+    link._reader.join(1.0)
+
+    assert not link._reader.is_alive()
+    server.stop()
+
+
+def test_handler_runtime_error_keeps_link_open():
+    handled = threading.Event()
+
+    def handler(msg):
+        if msg["t"] == "pos":
+            raise RuntimeError("boom")
+        handled.set()
+
+    server = MessageServer("127.0.0.1", 0, handler)
+    server.start()
+    client = MessageClient("127.0.0.1", server.port)
+    client.connect()
+    try:
+        client.send(p.pos(1, 1))
+        client.send(p.leave())
+        assert handled.wait(2.0)
+        assert server.has_connection()
+    finally:
+        client.close()
+        server.stop()
+
+
+def test_handler_protocol_error_closes_link():
+    events = []
+
+    def handler(_msg):
+        raise p.ProtocolError("bad state")
+
+    server = MessageServer(
+        "127.0.0.1", 0, handler, on_disconnect=events.append
+    )
+    server.start()
+    client = MessageClient("127.0.0.1", server.port)
+    client.connect()
+    try:
+        client.send(p.leave())
+        assert wait_for(lambda: events == ["protocol"])
+        assert not server.has_connection()
+    finally:
+        client.close()
+        server.stop()

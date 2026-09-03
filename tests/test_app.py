@@ -66,6 +66,13 @@ def no_real_input(monkeypatch):
 
     monkeypatch.setattr(app_module, "Injector", FakeInjector)
     monkeypatch.setattr(app_module, "InputCapture", FakeCapture)
+    monkeypatch.setattr(
+        app_module.monitors,
+        "enumerate_local",
+        lambda device_id: [
+            Monitor(device_id, "0", 0, 0, 1920, 1080, primary=True)
+        ],
+    )
 
 
 class RecordingInjector:
@@ -86,6 +93,9 @@ class RecordingInjector:
     def click(self, button, pressed):
         RecordingInjector.calls.append(("click", button, pressed))
 
+    def key(self, kind, value, pressed):
+        RecordingInjector.calls.append(("key", kind, value, pressed))
+
     def release_all(self):
         RecordingInjector.calls.append(("release",))
 
@@ -100,6 +110,19 @@ def a_client(tmp_path, monkeypatch, delay=0.0):
     return instance
 
 
+def send_to_client(instance, messages):
+    from mouseshare.network import MessageClient, MessageServer
+
+    instance._active = "in"
+    server = MessageServer("127.0.0.1", 0, instance._on_message)
+    server.start()
+    client = MessageClient("127.0.0.1", server.port)
+    client.connect()
+    for message in messages:
+        client.send(message)
+    return server, client
+
+
 def test_a_burst_of_positions_is_collapsed_before_it_is_injected(
     tmp_path, monkeypatch
 ):
@@ -107,9 +130,12 @@ def test_a_burst_of_positions_is_collapsed_before_it_is_injected(
     does not. Injected one at a time the backlog only grows, and the
     cursor keeps gliding after the hand has stopped."""
     instance = a_client(tmp_path, monkeypatch, delay=0.002)
-    for x in range(500):
-        instance._on_message({"t": "pos", "x": x, "y": 10})
-    instance._inbox.stop()
+    server, client = send_to_client(
+        instance, ({"t": "pos", "x": x, "y": 10} for x in range(500))
+    )
+    assert wait_for(lambda: RecordingInjector.calls[-1:] == [("move", 499, 10)])
+    client.close()
+    server.stop()
 
     assert len(RecordingInjector.calls) < 100
     assert RecordingInjector.calls[-1] == ("move", 499, 10)
@@ -121,10 +147,14 @@ def test_a_click_still_lands_at_the_position_it_was_made_at(
     """Collapsing must not reach across a click, or the button goes down
     somewhere the user never pressed it."""
     instance = a_client(tmp_path, monkeypatch)
-    instance._on_message({"t": "pos", "x": 5, "y": 5})
-    instance._on_message({"t": "click", "button": "left", "pressed": True})
-    instance._on_message({"t": "pos", "x": 9, "y": 9})
-    instance._inbox.stop()
+    server, client = send_to_client(instance, [
+        {"t": "pos", "x": 5, "y": 5},
+        {"t": "click", "button": "left", "pressed": True},
+        {"t": "pos", "x": 9, "y": 9},
+    ])
+    assert wait_for(lambda: len(RecordingInjector.calls) == 3)
+    client.close()
+    server.stop()
 
     assert RecordingInjector.calls == [
         ("move", 5, 5), ("click", "left", True), ("move", 9, 9),
@@ -142,9 +172,12 @@ def test_a_failed_injection_does_not_stop_the_ones_after_it(
         RecordingInjector, "click",
         lambda self, button, pressed: (_ for _ in ()).throw(ValueError(button)),
     )
-    instance._on_message(boom)
-    instance._on_message({"t": "pos", "x": 7, "y": 7})
-    instance._inbox.stop()
+    server, client = send_to_client(
+        instance, [boom, {"t": "pos", "x": 7, "y": 7}]
+    )
+    assert wait_for(lambda: ("move", 7, 7) in RecordingInjector.calls)
+    client.close()
+    server.stop()
 
     assert ("move", 7, 7) in RecordingInjector.calls
 
@@ -155,12 +188,86 @@ def test_nothing_is_injected_after_input_has_been_released(
     """Stopping the queue drains it. Drained after the release, a held
     key goes back down on a machine whose owner cannot then type their
     way out of it."""
-    instance = a_client(tmp_path, monkeypatch, delay=0.002)
-    for x in range(200):
-        instance._on_message({"t": "pos", "x": x, "y": 1})
-    instance._do_teardown("peer went away")
+    instance = a_client(tmp_path, monkeypatch)
+    entered = threading.Event()
+    release = threading.Event()
+    original = instance._on_message
+
+    def gated(message, source="in"):
+        entered.set()
+        release.wait(1.0)
+        original(message, source)
+
+    instance._on_message = gated
+    server, client = send_to_client(instance, [
+        {"t": "pos", "x": 1, "y": 1},
+        {"t": "key", "kind": "char", "value": "z", "pressed": True},
+    ])
+    instance._server = server
+    assert entered.wait(1.0)
+    teardown = threading.Thread(
+        target=instance._do_teardown, args=("peer went away",)
+    )
+    teardown.start()
+    assert wait_for(lambda: server._link._worker_stop.is_set())
+    release.set()
+    teardown.join(1.0)
+    assert not teardown.is_alive()
 
     assert RecordingInjector.calls[-1] == ("release",)
+    assert not any(call[:2] == ("key", "char") for call in RecordingInjector.calls)
+    client.close()
+
+
+def test_teardown_does_not_join_an_inbound_worker_while_holding_app_lock(
+    tmp_path, monkeypatch
+):
+    instance = a_client(tmp_path, monkeypatch)
+    handler_ready = threading.Event()
+    enter_handler = threading.Event()
+    reasons = []
+    original = instance._on_message
+
+    def gated(message, source="in"):
+        handler_ready.set()
+        enter_handler.wait(1.0)
+        original(message, source)
+
+    instance._on_message = gated
+    original_teardown = instance._teardown
+    instance._teardown = lambda reason: (
+        reasons.append(reason), original_teardown(reason)
+    )[1]
+    server, client = send_to_client(instance, [{"t": "pos", "x": 1, "y": 1}])
+    instance._server = server
+    assert handler_ready.wait(1.0)
+    threading.Timer(0.02, enter_handler.set).start()
+
+    started = time.perf_counter()
+    instance._teardown("first reason")
+    elapsed = time.perf_counter() - started
+
+    assert elapsed < 0.5
+    assert reasons == ["first reason"]
+    assert "first reason" in instance.state.snapshot()["error"]
+    client.close()
+
+
+def test_teardown_flushes_a_queued_leave_before_closing_the_socket(pair):
+    connector, target = pair
+    connector.connect_manually("127.0.0.1", target._server.port)
+    pair_up(connector, target)
+    assert wait_for(lambda: connector._outbox is not None)
+    received = threading.Event()
+    original = target._dispatch
+    target._dispatch = lambda msg: (
+        received.set() if msg.get("t") == "leave" else original(msg)
+    )
+
+    connector._outbox.put({"t": "leave"})
+    connector._teardown("test flush")
+
+    assert received.wait(1.0)
 
 
 def make_app(tmp_path, name, port):
@@ -276,6 +383,32 @@ def test_the_right_code_pairs_both_machines(pair):
     assert target._peer_caps == frozenset({"heartbeat"})
 
 
+def test_client_sends_edge_to_host_through_its_outbox(pair):
+    connector, target = pair
+    connector.connect_manually("127.0.0.1", target._server.port)
+    pair_up(connector, target)
+    assert wait_for(lambda: target._client_session is not None)
+    received = []
+    connector._dispatch = lambda msg: received.append(msg)
+    target._client_session.report_edge(12, 34)
+    assert wait_for(lambda: any(msg.get("t") == "edge" for msg in received))
+    assert next(msg for msg in received if msg.get("t") == "edge")["x"] == 12
+
+
+def test_start_heartbeat_is_gated_when_idle_and_after_teardown(tmp_path):
+    instance = make_app(tmp_path, "idle-heartbeat", 0)
+    instance._peer_caps = frozenset({"heartbeat"})
+    before = {t.ident for t in threading.enumerate()}
+    instance._start_heartbeat()
+    assert instance._heartbeat_stop is None
+    assert {t.ident for t in threading.enumerate()} == before
+    instance._do_teardown("test")
+    instance._peer_caps = frozenset({"heartbeat"})
+    instance._start_heartbeat()
+    assert instance._heartbeat_stop is None
+    assert {t.ident for t in threading.enumerate()} == before
+
+
 def test_an_optional_ping_in_idle_is_ignored(tmp_path):
     instance = make_app(tmp_path, "idle", 0)
     instance._on_message({"t": "ping", "seq": 1, "v": 3})
@@ -297,7 +430,7 @@ def test_v2_peer_has_no_heartbeat_and_can_still_move_cursor(tmp_path, monkeypatc
     instance._on_message({"t": "layout", "monitors": [], "v": 2})
     instance._on_message({"t": "pos", "x": 12, "y": 34, "v": 2})
     time.sleep(0.03)
-    instance._inbox.stop()
+    instance._outbox.stop()
     assert instance.negotiated_version == 2
     assert instance._heartbeat_stop is None
     assert not any(msg["t"] == "ping" for msg in sent)
@@ -371,7 +504,7 @@ def test_heartbeat_timeout_tears_down_and_releases_host(pair, monkeypatch):
     assert capture.suppressing is True
 
     # Leave the real socket open but make the peer stop all heartbeat traffic.
-    monkeypatch.setattr(target, "_send", lambda _message: None)
+    monkeypatch.setattr(target._outbox, "_send", lambda _message: None)
     monkeypatch.setattr(app_module, "HEARTBEAT_TIMEOUT", 0.03)
     connector._last_received = time.monotonic()
     assert wait_for(lambda: connector._phase == "idle", timeout=1.0)

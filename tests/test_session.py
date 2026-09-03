@@ -264,7 +264,7 @@ def test_stopping_releases_suppression():
 
 def test_the_client_injects_what_it_is_told_to():
     injector = FakeInjector()
-    client = ClientSession(injector)
+    client = ClientSession(injector, lambda msg: None)
     client.on_message({"t": "enter", "x": 5, "y": 6})
     client.on_message({"t": "pos", "x": 7, "y": 8})
     client.on_message({"t": "click", "button": "left", "pressed": True})
@@ -279,7 +279,7 @@ def test_the_client_injects_what_it_is_told_to():
 
 def test_the_client_lets_go_of_everything_when_the_cursor_leaves():
     injector = FakeInjector()
-    client = ClientSession(injector)
+    client = ClientSession(injector, lambda msg: None)
     client.on_message({"t": "leave"})
     assert injector.releases == 1
 
@@ -287,7 +287,7 @@ def test_the_client_lets_go_of_everything_when_the_cursor_leaves():
 def test_the_client_lets_go_of_everything_when_the_host_vanishes():
     """A chord held at the moment the link dropped must not stay down."""
     injector = FakeInjector()
-    client = ClientSession(injector)
+    client = ClientSession(injector, lambda msg: None)
     client.on_message({"t": "key", "kind": "special", "value": "ctrl_l", "pressed": True})
     client.on_disconnect("eof")
     assert injector.releases == 1
@@ -295,7 +295,7 @@ def test_the_client_lets_go_of_everything_when_the_host_vanishes():
 
 def test_the_client_ignores_messages_it_does_not_understand():
     injector = FakeInjector()
-    ClientSession(injector).on_message({"t": "something_new"})
+    ClientSession(injector, lambda msg: None).on_message({"t": "something_new"})
     assert injector.calls == []
 
 

@@ -72,7 +72,6 @@ class App:
         self._client_session: Optional[ClientSession] = None
         self._capture: Optional[InputCapture] = None
         self._outbox: Optional[Outbox] = None
-        self._inbox: Optional[Outbox] = None
         # Temporary; see _injection_cost.
         self._inj_since = time.monotonic()
         self._inj_n = self._inj_pos = 0
@@ -481,7 +480,7 @@ class App:
         "proved": {"pair_ok", "pair_err"},
         "session": {
             "layout", "enter", "pos", "click", "scroll", "key", "leave",
-            "ping", "pong",
+            "ping", "pong", "edge",
         },
     }
 
@@ -569,13 +568,17 @@ class App:
             self._start_heartbeat()
         elif t == "ping":
             if "heartbeat" in self._peer_caps:
-                self._send(protocol.pong(msg["seq"]))
+                reply = protocol.pong(msg["seq"])
+                if self._outbox is not None:
+                    self._outbox.put(reply)
+                else:
+                    self._send(reply)
         elif t == "pong":
             return
-        elif self._inbox is not None:
-            # Not injected here: this is the socket reader, and injecting
-            # is far slower than a mouse reports. See _become_client.
-            self._inbox.put(msg)
+        elif t == "edge":
+            return
+        elif self._client_session is not None:
+            self._inject(msg)
 
     def _on_pair_err(self, msg: dict) -> None:
         reason = msg.get("reason", "Pairing failed.")
@@ -882,14 +885,11 @@ class App:
     def _become_client(self) -> None:
         self._phase = "session"
         self._injector = Injector.create()
-        self._client_session = ClientSession(self._injector)
-        # Injecting an event costs far more than receiving one, so the
-        # reader must not do it inline: the shortfall lands in the socket
-        # buffer, invisible to the host, and every stale position is then
-        # replayed in order -- the cursor arrives late and keeps moving
-        # after the hand has stopped. Queued here instead, consecutive
-        # positions collapse and only the newest one is ever injected.
-        self._inbox = Outbox(self._inject, on_error=lambda exc: None)
+        self._outbox = Outbox(
+            self._send,
+            on_error=lambda exc: self._on_disconnect(f"send failed: {exc}"),
+        )
+        self._client_session = ClientSession(self._injector, self._outbox.put)
         self.state.set(
             screen="layout",
             pairing=None,
@@ -942,6 +942,9 @@ class App:
                     self._send(message)
         except Exception:  # noqa: BLE001 - recovery worker must never escape
             log.exception("heartbeat worker failed")
+            with self._lock:
+                if stop.is_set() or self._heartbeat_stop is not stop:
+                    return
             self._teardown("heartbeat")
 
     # -- teardown ------------------------------------------------------------
@@ -983,28 +986,32 @@ class App:
             if self._heartbeat_stop is not None:
                 self._heartbeat_stop.set()
                 self._heartbeat_stop = None
+            client = self._client
+            server = self._server
+
+        # A handler may already be waiting for the app lock. Stop and join it
+        # without owning that lock, then no input can arrive after release.
+        if client is not None:
+            client.stop_inbound()
+        if server is not None:
+            server.stop_inbound()
+
+        with self._lock:
             if self._host is not None:
                 self._host.on_disconnect(reason)
-            # Before the release below, never after: stop() drains what is
-            # still queued, and a key press injected after release_all
-            # leaves a modifier held down on a machine whose owner then
-            # cannot type their way out of it.
-            if self._inbox is not None:
-                self._inbox.stop()
             if self._client_session is not None:
                 self._client_session.on_disconnect(reason)
             if self._capture is not None:
                 self._capture.stop()
             if self._outbox is not None:
                 self._outbox.stop()
-            if self._client is not None:
-                self._client.close()
-            if self._server is not None:
-                # The inbound link is the one an unwelcome peer arrives on,
-                # so refusing it has to actually hang up.
-                self._server.disconnect(reason)
+            # The outbox flushes while the socket is still usable.
+            if client is not None:
+                client.close()
+            if server is not None:
+                server.disconnect(reason)
             self._host = self._client_session = self._capture = None
-            self._outbox = self._inbox = None
+            self._outbox = None
             self._client = self._injector = None
             self._role = ""
             self._phase = "idle"

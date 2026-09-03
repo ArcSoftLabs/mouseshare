@@ -2,6 +2,7 @@
 only show up under load.
 """
 import threading
+import time
 
 from mouseshare import protocol, session
 from mouseshare.inject import Injector
@@ -103,7 +104,8 @@ def test_concurrent_sends_do_not_corrupt_the_stream():
 
     def on_message(msg):
         received.append(msg)
-        if len(received) >= 400:
+        keys = sum(item["t"] == "key" for item in received)
+        if keys == 200 and any(item["t"] == "pos" for item in received):
             done.set()
 
     server = MessageServer("127.0.0.1", 0, on_message)
@@ -124,10 +126,40 @@ def test_concurrent_sends_do_not_corrupt_the_stream():
         for t in threads:
             t.join()
 
-        assert done.wait(timeout=5), f"only {len(received)} of 400 arrived intact"
-        assert len(received) == 400
+        assert done.wait(timeout=5), f"only {len(received)} messages arrived intact"
+        assert sum(msg["t"] == "key" for msg in received) == 200
+        positions = [msg["x"] for msg in received if msg["t"] == "pos"]
+        assert positions == sorted(positions)
+        assert positions[-1] <= 199
         client.close()
     finally:
+        server.stop()
+
+
+def test_position_flood_does_not_block_leave():
+    handled = []
+    release = threading.Event()
+
+    def on_message(msg):
+        if not handled:
+            release.wait(2.0)
+        handled.append(msg)
+
+    server = MessageServer("127.0.0.1", 0, on_message)
+    server.start()
+    client = MessageClient("127.0.0.1", server.port)
+    client.connect()
+    try:
+        for i in range(10_000):
+            client.send(protocol.pos(i, i))
+        client.send(protocol.leave())
+        release.set()
+        deadline = time.time() + 5
+        while time.time() < deadline and not any(m["t"] == "leave" for m in handled):
+            time.sleep(0.01)
+        assert any(m["t"] == "leave" for m in handled)
+    finally:
+        client.close()
         server.stop()
 
 

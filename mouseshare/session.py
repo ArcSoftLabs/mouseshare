@@ -249,8 +249,12 @@ class HostSession:
 class ClientSession:
     """Injects what the host sends. Holds no layout of its own."""
 
-    def __init__(self, injector):
+    def __init__(self, injector, send: Callable[[dict], None]):
         self.injector = injector
+        self._send = send
+
+    def report_edge(self, x: int, y: int) -> None:
+        self._send(protocol.edge(x, y))
 
     def on_message(self, msg: dict) -> None:
         t = msg.get("t")
