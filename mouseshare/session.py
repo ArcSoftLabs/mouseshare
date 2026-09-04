@@ -13,7 +13,7 @@ inside the app, because the user cannot type.
 """
 import logging
 import time
-from typing import Callable, Optional, Tuple
+from typing import Callable, Dict, Optional, Tuple
 
 from . import protocol
 from .layout import Layout
@@ -45,15 +45,19 @@ class HostSession:
         self,
         layout: Layout,
         local_id: str,
-        peer_id: str,
         capture,
         injector,
-        send: Callable[[dict], None],
+        send: Callable[..., None],
+        peer_id: Optional[str] = None,
         on_remote_change: Callable[[bool], None] = lambda remote: None,
+        peers: Optional[Dict[str, list]] = None,
     ):
         self.layout = layout
         self.local_id = local_id
-        self.peer_id = peer_id
+        self.peers = dict(peers or {})
+        if peer_id is not None:
+            self.peers.setdefault(peer_id, [])
+        self.peer_id = peer_id or next(iter(self.peers), "")
         self.capture = capture
         self.injector = injector
         self._send = send
@@ -223,6 +227,23 @@ class HostSession:
         log.info("peer disconnected (%s)", reason)
         self._release()
 
+    def add_peer(self, device_id: str, peer_monitors: list) -> None:
+        self.peers[device_id] = peer_monitors
+        if not self.peer_id:
+            self.peer_id = device_id
+
+    def remove_peer(self, device_id: str) -> None:
+        self.peers.pop(device_id, None)
+        if self.peer_id == device_id:
+            self.peer_id = next(iter(self.peers), "")
+
+    def on_peer_lost(self, device_id: str) -> None:
+        """Forget one client, releasing input only when it owned the cursor."""
+        was_active = self.remote and self.peer_id == device_id
+        if was_active:
+            self._release()
+        self.remove_peer(device_id)
+
     def stop(self) -> None:
         self._release()
 
@@ -240,7 +261,7 @@ class HostSession:
         """Send, and treat a failure as the peer being gone -- releasing
         input first, because that is the part that cannot wait."""
         try:
-            self._send(msg)
+            self._send(self.peer_id, msg)
         except OSError as exc:
             log.warning("send failed (%s); releasing input", exc)
             self._release()

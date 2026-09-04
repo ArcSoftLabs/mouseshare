@@ -152,7 +152,10 @@ def test_a_second_connection_is_refused_while_one_is_live():
 
         second = socket.create_connection(("127.0.0.1", server.port))
         second.settimeout(2.0)
-        assert second.recv(4096) == b""  # refused and closed immediately
+        assert p.decode(second.recv(4096)) == {
+            "t": "pair_err", "reason": "busy", "v": 3,
+        }
+        assert second.recv(4096) == b""  # then closed immediately
         second.close()
 
         # the original peer is untouched

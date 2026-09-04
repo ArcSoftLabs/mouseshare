@@ -59,7 +59,7 @@ class FakeSender:
         self.sent = []
         self.broken = False
 
-    def __call__(self, msg):
+    def __call__(self, peer_id, msg):
         if self.broken:
             raise OSError("peer went away")
         self.sent.append(msg)

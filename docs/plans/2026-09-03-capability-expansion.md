@@ -321,3 +321,5 @@ GUI launch via `open`); Windows runs via `py.exe`; Linux via WSLg.
 - [x] P2 — client send path and off-reader-thread message handling.
 - [x] P3 — mutual authentication verifies the target's `pair_ok` response.
 - [x] A1 — local escape gesture, release re-warp, and listener-death recovery.
+- [x] M1 — multi-link host transport and explicit busy/duplicate/full refusal.
+- [x] M2 — per-link app handshake/session state and selective teardown.

@@ -50,10 +50,17 @@ function render(next) {
   const remote = state.session && state.session.role === 'host' && state.session.remote;
   const unauthenticated = state.session?.unauthenticated_peer;
   const escapeKey = state.session?.escape_key || state.settings?.escape_key || 'ctrl';
-  status.textContent = remote
-    ? `Double-tap ${escapeKey === 'cmd' ? 'Cmd' : escapeKey[0].toUpperCase() + escapeKey.slice(1)} to return`
-    : unauthenticated ? 'Warning: this protocol v2 peer cannot authenticate its response' : '';
-  status.hidden = !remote && !unauthenticated;
+  const connected = state.session?.clients?.length || (state.session ? 1 : 0);
+  const messages = [];
+  if (connected) messages.push(`${connected} connected`);
+  if (remote) messages.push(
+    `Double-tap ${escapeKey === 'cmd' ? 'Cmd' : escapeKey[0].toUpperCase() + escapeKey.slice(1)} to return`
+  );
+  if (unauthenticated) messages.push(
+    'Warning: this protocol v2 peer cannot authenticate its response'
+  );
+  status.textContent = messages.join(' · ');
+  status.hidden = messages.length === 0;
   if (document.activeElement !== $('#escape-key')) {
     $('#escape-key').value = state.settings.escape_key;
   }
@@ -98,7 +105,9 @@ function renderPeers() {
     // Reachable, not online. Discovery finds machines; it does not decide
     // whether one we already hold an address for can be dialled.
     button.disabled = !peer.reachable && !peer.connected;
-    button.onclick = () => (peer.connected ? api().cancel() : api().connect(peer.device_id));
+    button.onclick = () => (peer.connected
+      ? api().disconnect(peer.device_id)
+      : api().connect(peer.device_id));
     card.appendChild(button);
     host.appendChild(card);
   }

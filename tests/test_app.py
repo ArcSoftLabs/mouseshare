@@ -13,8 +13,8 @@ import time
 import pytest
 
 from mouseshare import app as app_module
-from mouseshare import config, monitors
-from mouseshare.app import App
+from mouseshare import config, monitors, protocol
+from mouseshare.app import App, _Peer
 from mouseshare.layout import Monitor
 
 
@@ -105,22 +105,85 @@ def a_client(tmp_path, monkeypatch, delay=0.0):
     RecordingInjector.delay = delay
     monkeypatch.setattr(app_module, "Injector", RecordingInjector)
     instance = make_app(tmp_path, "client", 0)
-    instance._peer_id, instance._peer_name = "host", "Host"
-    instance._become_client()
+    class Link:
+        def send(self, _msg): pass
+        def stop_inbound(self): pass
+        def close(self): pass
+    peer = _Peer("host", "Host", Link(), phase="challenged", role="client", version=3)
+    instance._handshakes.append(peer)
+    instance._become_client(peer)
     return instance
 
 
 def send_to_client(instance, messages):
     from mouseshare.network import MessageClient, MessageServer
 
-    instance._active = "in"
-    server = MessageServer("127.0.0.1", 0, instance._on_message)
+    peer = instance._peers["host"]
+    server = MessageServer("127.0.0.1", 0, lambda msg: instance._on_message(peer, msg))
     server.start()
     client = MessageClient("127.0.0.1", server.port)
     client.connect()
     for message in messages:
         client.send(message)
     return server, client
+
+
+def test_challenge_reader_survives_heartbeat_teardown_race(tmp_path):
+    """Peer iteration and identity updates share the teardown lock."""
+    iterating = threading.Event()
+    teardown_started = threading.Event()
+    continue_iteration = threading.Event()
+
+    class ValuesView:
+        def __init__(self, values):
+            self._iterator = iter(values)
+
+        def __iter__(self):
+            first = next(self._iterator)
+            yield first
+            iterating.set()
+            assert teardown_started.wait(1)
+            continue_iteration.wait(1)
+            yield from self._iterator
+
+    class GatedPeers(dict):
+        def values(self):
+            return ValuesView(super().values())
+
+    class Link:
+        def send(self, _msg): pass
+        def stop_inbound(self): pass
+        def close(self): pass
+
+    instance = make_app(tmp_path, "challenge-race", 0)
+    live = _Peer("live", "Live", Link(), phase="session", role="host")
+    other = _Peer("other", "Other", Link(), phase="session", role="host")
+    incoming = _Peer("", "", Link(), phase="offered", role="host")
+    instance._peers = GatedPeers({"live": live, "other": other})
+    instance._handshakes.append(incoming)
+    errors = []
+
+    reader = threading.Thread(target=lambda: _record_error(
+        errors, instance._on_challenge, incoming,
+        protocol.pair_challenge("ab" * 16, "new-peer")))
+    reader.start()
+    assert iterating.wait(1)
+    teardown = threading.Thread(target=lambda: (
+        teardown_started.set(), instance._teardown_peer(live, "heartbeat", False)))
+    teardown.start()
+    continue_iteration.set()
+    reader.join(1)
+    teardown.join(1)
+
+    assert not reader.is_alive()
+    assert errors == []
+
+
+def _record_error(errors, function, *args):
+    try:
+        function(*args)
+    except Exception as exc:  # noqa: BLE001 - the exception is the assertion
+        errors.append(exc)
 
 
 def test_a_burst_of_positions_is_collapsed_before_it_is_injected(
@@ -193,10 +256,10 @@ def test_nothing_is_injected_after_input_has_been_released(
     release = threading.Event()
     original = instance._on_message
 
-    def gated(message, source="in"):
+    def gated(peer, message):
         entered.set()
         release.wait(1.0)
-        original(message, source)
+        original(peer, message)
 
     instance._on_message = gated
     server, client = send_to_client(instance, [
@@ -204,9 +267,11 @@ def test_nothing_is_injected_after_input_has_been_released(
         {"t": "key", "kind": "char", "value": "z", "pressed": True},
     ])
     instance._server = server
+    peer = instance._peers["host"]
+    peer.link = server
     assert entered.wait(1.0)
     teardown = threading.Thread(
-        target=instance._do_teardown, args=("peer went away",)
+        target=instance._teardown_peer, args=(peer, "peer went away")
     )
     teardown.start()
     assert wait_for(lambda: server._link._worker_stop.is_set())
@@ -228,23 +293,25 @@ def test_teardown_does_not_join_an_inbound_worker_while_holding_app_lock(
     reasons = []
     original = instance._on_message
 
-    def gated(message, source="in"):
+    def gated(peer, message):
         handler_ready.set()
         enter_handler.wait(1.0)
-        original(message, source)
+        original(peer, message)
 
     instance._on_message = gated
-    original_teardown = instance._teardown
-    instance._teardown = lambda reason: (
-        reasons.append(reason), original_teardown(reason)
+    original_teardown = instance._teardown_peer
+    instance._teardown_peer = lambda peer, reason, publish=True: (
+        reasons.append(reason), original_teardown(peer, reason, publish)
     )[1]
     server, client = send_to_client(instance, [{"t": "pos", "x": 1, "y": 1}])
     instance._server = server
+    peer = instance._peers["host"]
+    peer.link = server
     assert handler_ready.wait(1.0)
     threading.Timer(0.02, enter_handler.set).start()
 
     started = time.perf_counter()
-    instance._teardown("first reason")
+    instance._teardown_peer(peer, "first reason")
     elapsed = time.perf_counter() - started
 
     assert elapsed < 0.5
@@ -257,15 +324,17 @@ def test_teardown_flushes_a_queued_leave_before_closing_the_socket(pair):
     connector, target = pair
     connector.connect_manually("127.0.0.1", target._server.port)
     pair_up(connector, target)
-    assert wait_for(lambda: connector._outbox is not None)
+    assert wait_for(lambda: bool(connector._peers))
+    peer = next(iter(connector._peers.values()))
+    assert wait_for(lambda: peer.outbox is not None)
     received = threading.Event()
     original = target._dispatch
-    target._dispatch = lambda msg: (
-        received.set() if msg.get("t") == "leave" else original(msg)
+    target._dispatch = lambda peer, msg: (
+        received.set() if msg.get("t") == "leave" else original(peer, msg)
     )
 
-    connector._outbox.put({"t": "leave"})
-    connector._teardown("test flush")
+    peer.outbox.put({"t": "leave"})
+    connector._teardown_peer(peer, "test flush")
 
     assert received.wait(1.0)
 
@@ -318,7 +387,9 @@ def test_remote_state_delivery_leaves_the_capture_callback_thread(tmp_path):
 
     instance = App(record, cfg_path=tmp_path / "state-thread.json")
     instance.state.mark_ready()
-    instance.state.set(session={"role": "host", "remote": False})
+    instance._host = type("Host", (), {"remote": True, "peer_id": "peer"})()
+    instance._peers["peer"] = _Peer("peer", "Peer", None,
+                                    phase="session", role="host")
     instance._host_remote_changed(True)
 
     assert delivered.wait(1)
@@ -329,7 +400,8 @@ def start_listener(instance):
     from mouseshare.network import MessageServer
 
     instance._server = MessageServer(
-        "127.0.0.1", instance.cfg.port, instance._on_message, instance._on_disconnect
+        "127.0.0.1", instance.cfg.port,
+        instance._on_inbound_message, instance._on_inbound_disconnect,
     )
     instance._server.start()
     return instance
@@ -353,7 +425,8 @@ def ready_to_type(connector):
     """The connector can only prove a code once the challenge has arrived
     with its nonce. The UI gates the code entry on exactly this, so the
     tests wait for it too rather than racing the network."""
-    assert wait_for(lambda: connector._nonce), "no challenge received"
+    assert wait_for(lambda: any(p.nonce for p in connector._handshakes)), \
+        "no challenge received"
 
 
 def pair_up(connector, target):
@@ -379,8 +452,8 @@ def test_the_right_code_pairs_both_machines(pair):
     assert wait_for(lambda: target.state.snapshot().get("session"))
     assert target.state.snapshot()["session"]["role"] == "client"
     assert connector.negotiated_version == 3
-    assert connector._peer_caps == frozenset({"heartbeat"})
-    assert target._peer_caps == frozenset({"heartbeat"})
+    assert next(iter(connector._peers.values())).caps == {"heartbeat"}
+    assert next(iter(target._peers.values())).caps == {"heartbeat"}
 
 
 def test_client_sends_edge_to_host_through_its_outbox(pair):
@@ -389,7 +462,7 @@ def test_client_sends_edge_to_host_through_its_outbox(pair):
     pair_up(connector, target)
     assert wait_for(lambda: target._client_session is not None)
     received = []
-    connector._dispatch = lambda msg: received.append(msg)
+    connector._dispatch = lambda peer, msg: received.append(msg)
     target._client_session.report_edge(12, 34)
     assert wait_for(lambda: any(msg.get("t") == "edge" for msg in received))
     assert next(msg for msg in received if msg.get("t") == "edge")["x"] == 12
@@ -397,23 +470,18 @@ def test_client_sends_edge_to_host_through_its_outbox(pair):
 
 def test_start_heartbeat_is_gated_when_idle_and_after_teardown(tmp_path):
     instance = make_app(tmp_path, "idle-heartbeat", 0)
-    instance._peer_caps = frozenset({"heartbeat"})
+    peer = _Peer("peer", "Peer", None, caps=frozenset({"heartbeat"}))
     before = {t.ident for t in threading.enumerate()}
-    instance._start_heartbeat()
-    assert instance._heartbeat_stop is None
-    assert {t.ident for t in threading.enumerate()} == before
-    instance._do_teardown("test")
-    instance._peer_caps = frozenset({"heartbeat"})
-    instance._start_heartbeat()
-    assert instance._heartbeat_stop is None
+    instance._start_heartbeat(peer)
+    assert peer.heartbeat_stop is None
     assert {t.ident for t in threading.enumerate()} == before
 
 
 def test_an_optional_ping_in_idle_is_ignored(tmp_path):
     instance = make_app(tmp_path, "idle", 0)
-    instance._on_message({"t": "ping", "seq": 1, "v": 3})
-    assert instance._phase == "idle"
-    assert instance._active == "in"
+    peer = _Peer("", "", None)
+    instance._on_message(peer, {"t": "ping", "seq": 1, "v": 3})
+    assert peer.phase == "idle"
 
 
 def test_v2_peer_has_no_heartbeat_and_can_still_move_cursor(tmp_path, monkeypatch):
@@ -425,14 +493,16 @@ def test_v2_peer_has_no_heartbeat_and_can_still_move_cursor(tmp_path, monkeypatc
         def send(self, msg):
             sent.append(msg)
 
-    instance._server = FakeLink()
-    instance._active = "in"
-    instance._on_message({"t": "layout", "monitors": [], "v": 2})
-    instance._on_message({"t": "pos", "x": 12, "y": 34, "v": 2})
+    peer = instance._peers["host"]
+    peer.link = FakeLink()
+    peer.version = 2
+    peer.caps = frozenset()
+    instance._on_message(peer, {"t": "layout", "monitors": [], "v": 2})
+    instance._on_message(peer, {"t": "pos", "x": 12, "y": 34, "v": 2})
     time.sleep(0.03)
-    instance._outbox.stop()
+    peer.outbox.stop()
     assert instance.negotiated_version == 2
-    assert instance._heartbeat_stop is None
+    assert peer.heartbeat_stop is None
     assert not any(msg["t"] == "ping" for msg in sent)
     assert ("move", 12, 34) in RecordingInjector.calls
 
@@ -476,7 +546,8 @@ def test_v2_speaking_peer_pairs_and_receives_cursor_movement(tmp_path):
     try:
         instance.connect_manually("127.0.0.1", listener.getsockname()[1])
         assert wait_for(lambda: instance.state.snapshot().get("session"))
-        instance._outbox.put({"t": "pos", "x": 22, "y": 33})
+        next(iter(instance._peers.values())).outbox.put(
+            {"t": "pos", "x": 22, "y": 33})
         assert moved.wait(2.0)
         assert instance.negotiated_version == 2
         assert received[-1]["t"] == "pos"
@@ -504,10 +575,12 @@ def test_heartbeat_timeout_tears_down_and_releases_host(pair, monkeypatch):
     assert capture.suppressing is True
 
     # Leave the real socket open but make the peer stop all heartbeat traffic.
-    monkeypatch.setattr(target._outbox, "_send", lambda _message: None)
+    target_peer = next(iter(target._peers.values()))
+    connector_peer = next(iter(connector._peers.values()))
+    monkeypatch.setattr(target_peer.outbox, "_send", lambda _message: None)
     monkeypatch.setattr(app_module, "HEARTBEAT_TIMEOUT", 0.03)
-    connector._last_received = time.monotonic()
-    assert wait_for(lambda: connector._phase == "idle", timeout=1.0)
+    connector_peer.last_received = time.monotonic()
+    assert wait_for(lambda: connector_peer.phase == "idle", timeout=1.0)
     assert capture.stop_remote_calls == 1
     assert capture.suppressing is False
     assert wait_for(lambda: not target_injector.held)
@@ -520,22 +593,24 @@ def test_stopped_heartbeat_cannot_tear_down_a_later_pairing(pair, monkeypatch):
     connector, target = pair
     connector.connect_manually("127.0.0.1", target._server.port)
     pair_up(connector, target)
-    assert wait_for(lambda: connector._heartbeat_stop is not None)
-
+    assert wait_for(lambda: bool(connector._peers))
+    old_peer = next(iter(connector._peers.values()))
+    assert wait_for(lambda: old_peer.heartbeat_stop is not None)
     calls = []
-    original = connector._teardown
+    original = connector._teardown_peer
 
-    def counted_teardown(reason):
-        calls.append(reason)
-        original(reason)
+    def counted_teardown(peer, reason, publish=True):
+        calls.append((peer, reason))
+        return original(peer, reason, publish)
 
-    monkeypatch.setattr(connector, "_teardown", counted_teardown)
+    monkeypatch.setattr(connector, "_teardown_peer", counted_teardown)
+
     connector.cancel()
     calls.clear()
     time.sleep(3 * app_module.HEARTBEAT_INTERVAL)
     assert calls == []
 
-    assert wait_for(lambda: target._phase == "idle")
+    assert wait_for(lambda: not target._peers)
     connector.connect_manually("127.0.0.1", target._server.port)
     assert wait_for(lambda: connector.state.snapshot().get("session"))
     calls.clear()
@@ -575,8 +650,9 @@ def test_the_host_learns_the_peers_monitors(pair):
     # The session is the observable signal that pair_ok arrived; the
     # monitor list is set in the same handler.
     assert wait_for(lambda: connector.state.snapshot().get("session"))
-    assert connector._peer_monitors
-    assert connector._peer_monitors[0].device_id == target.cfg.device_id
+    peer = connector._peers[target.cfg.device_id]
+    assert peer.monitors
+    assert peer.monitors[0].device_id == target.cfg.device_id
 
 
 def test_the_layout_shows_both_machines_after_pairing(pair):
@@ -721,19 +797,21 @@ def test_being_connected_to_does_not_erase_the_address_we_had(
         name="Mac", token="ab" * 32,
         last_address="192.168.1.50", last_port=39471,
     )
-    instance._peer_id = "mac"
-    instance._client = None  # they dialled us, so we have no outbound socket
-    instance._nonce = "ab" * 16
-    instance._pair_secret = bytes.fromhex(instance.cfg.peers["mac"].token)
+    class Link:
+        def send(self, _msg): pass
+    peer = _Peer("mac", "Mac", Link(), phase="proved", role="host", version=3)
+    peer.nonce = "ab" * 16
+    peer.secret = bytes.fromhex(instance.cfg.peers["mac"].token)
+    instance._handshakes.append(peer)
     # What is stored is the point here, not the session that follows it.
-    monkeypatch.setattr(instance, "_become_host", lambda: None)
-    instance._on_pair_ok({
+    monkeypatch.setattr(instance, "_become_host", lambda _peer: None)
+    instance._on_pair_ok(peer, {
         "name": "Mac",
         "monitors": [],
         "token": "cd" * 32,
         "hmac": app_module.pairing.ok_proof(
-            instance._pair_secret,
-            instance._nonce,
+            peer.secret,
+            peer.nonce,
             "mac",
             instance.cfg.device_id,
         ),

@@ -11,7 +11,7 @@ import time
 import pytest
 
 from mouseshare import config, monitors, pairing, protocol
-from mouseshare.app import App
+from mouseshare.app import App, _Peer
 from mouseshare.layout import Monitor
 from mouseshare.network import MessageClient, MessageServer
 
@@ -33,7 +33,8 @@ def victim(tmp_path):
     instance.cfg.name = "Victim"
     instance.state.mark_ready()
     instance._server = MessageServer(
-        "127.0.0.1", 0, instance._on_message, instance._on_disconnect
+        "127.0.0.1", 0,
+        instance._on_inbound_message, instance._on_inbound_disconnect,
     )
     instance._server.start()
     yield instance
@@ -93,7 +94,7 @@ def test_forged_pair_ok_is_rejected_without_changing_the_token(
     victim.cfg.peers["attacker"] = config.Peer(name="Known peer", token=token)
     try:
         victim.connect_manually("127.0.0.1", listener.getsockname()[1])
-        assert wait_for(lambda: victim._phase == "idle")
+        assert wait_for(lambda: not victim._handshakes)
         assert victim.state.snapshot().get("session") is None
         assert victim.cfg.peers["attacker"].token == token
         assert "pair_ok not authenticated" in victim.state.snapshot()["error"]
@@ -109,9 +110,9 @@ def test_forged_pair_ok_does_not_save_a_fresh_token(tmp_path, forged_hmac):
     victim.state.mark_ready()
     try:
         victim.connect_manually("127.0.0.1", listener.getsockname()[1])
-        assert wait_for(lambda: victim._nonce)
+        assert wait_for(lambda: any(p.nonce for p in victim._handshakes))
         victim.submit_code("123456")
-        assert wait_for(lambda: victim._phase == "idle")
+        assert wait_for(lambda: not victim._handshakes)
         assert victim.state.snapshot().get("session") is None
         assert victim.cfg.peers == {}
         assert "pair_ok not authenticated" in victim.state.snapshot()["error"]
@@ -138,6 +139,61 @@ def test_v2_pair_ok_without_hmac_is_accepted_with_a_warning(
     finally:
         victim.stop()
         listener.close()
+
+
+def test_protocol_version_cannot_be_downgraded_after_the_first_frame(tmp_path):
+    """Discriminate app-level pinning from the link's own version pin.
+
+    Removing the per-peer negotiated-version check must make this fail even
+    though ``network._Link`` independently rejects mixed-version wire frames.
+    """
+    class Link:
+        def send(self, _msg):
+            pass
+
+    victim = App(lambda _s: None, cfg_path=tmp_path / "downgrade.json")
+    victim.state.mark_ready()
+    victim.cfg.peers["attacker"] = config.Peer("Attacker", "cd" * 32)
+    peer = _Peer("attacker", "", Link(), phase="offered", role="host")
+    victim._handshakes.append(peer)
+    try:
+        challenge = protocol.pair_challenge("ab" * 16, "attacker")
+        challenge["v"] = 3
+        victim._on_message(peer, challenge)
+        with pytest.raises(protocol.ProtocolError, match="version changed"):
+            ok = protocol.pair_ok("Attacker", [])
+            ok["v"] = 2
+            victim._on_message(peer, ok)
+        assert victim.state.snapshot()["session"] is None
+        assert victim.cfg.peers["attacker"].token == "cd" * 32
+    finally:
+        victim.stop()
+
+
+def test_inbound_duplicate_identity_cannot_disturb_live_session(victim):
+    """An inbound pair_request cannot replace the live owner of its ID."""
+    class LiveLink:
+        def send(self, _msg):
+            pass
+
+    live = _Peer("client", "Client", LiveLink(), phase="session", role="host")
+    victim._peers[live.device_id] = live
+    victim._host = type("Host", (), {"remote": True, "peer_id": "client"})()
+    capture = object()
+    victim._capture = capture
+    client, got = attacker(victim)
+    try:
+        client.send(protocol.pair_request("client", "Impostor"))
+        assert wait_for(lambda: got)
+        assert got[0] == {"t": "pair_err", "reason": "duplicate", "v": 3}
+        assert victim._peers["client"] is live
+        assert victim._capture is capture
+        assert victim._host.remote is True
+        assert victim.state.snapshot()["session"]["remote"] is True
+    finally:
+        client.close()
+        victim._peers.pop("client", None)
+        victim._host = victim._capture = None
 
 
 def test_an_unsolicited_pair_ok_does_not_start_a_session(victim):
@@ -197,10 +253,11 @@ def test_ping_during_pairing_is_ignored_without_advancing_or_dropping(victim):
     client, got = attacker(victim)
     client.send(protocol.pair_request("rogue", "Rogue"))
     assert wait_for(lambda: got)
-    assert victim._phase == "challenged"
+    peer = victim._inbound_peer
+    assert peer.phase == "challenged"
     client.send(protocol.ping(1))
     time.sleep(0.1)
-    assert victim._phase == "challenged"
+    assert peer.phase == "challenged"
     assert victim._server.has_connection()
     client.close()
 
@@ -269,12 +326,14 @@ def test_an_inbound_socket_cannot_hijack_an_outbound_handshake(tmp_path):
     # land in `proved` without a human typing anything.
     victim.cfg.peers[peer_id] = cfgmod.Peer(name="Peer", token="cd" * 32)
     victim._server = MessageServer(
-        "127.0.0.1", 0, victim._on_message, victim._on_disconnect
+        "127.0.0.1", 0,
+        victim._on_inbound_message, victim._on_inbound_disconnect,
     )
     victim._server.start()
     try:
         victim.connect_manually("127.0.0.1", holder["server"].port)
-        assert wait_for(lambda: victim._phase == "proved"), "never reached proved"
+        assert wait_for(lambda: any(p.phase == "proved" for p in victim._handshakes)), \
+            "never reached proved"
 
         from mouseshare.layout import Monitor
 
@@ -309,20 +368,21 @@ def test_a_disconnect_on_a_refused_link_does_not_kill_the_live_one(tmp_path):
     victim = App(lambda s: None, cfg_path=tmp_path / "victim.json")
     victim.state.mark_ready()
     victim._server = MessageServer(
-        "127.0.0.1", 0, victim._on_message, victim._on_disconnect
+        "127.0.0.1", 0,
+        victim._on_inbound_message, victim._on_inbound_disconnect,
     )
     victim._server.start()
     try:
         victim.connect_manually("127.0.0.1", silent.port)
-        assert wait_for(lambda: victim._client is not None)
+        assert wait_for(lambda: bool(victim._handshakes))
 
         intruder = MessageClient("127.0.0.1", victim._server.port)
         intruder.connect()
         intruder.close()
         time.sleep(0.4)
 
-        assert victim._client is not None, "the outbound link was collateral"
-        assert victim._client.is_connected()
+        outbound = victim._handshakes[0]
+        assert outbound.link.is_connected(), "the outbound link was collateral"
     finally:
         victim.stop()
         silent.stop()

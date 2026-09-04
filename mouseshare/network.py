@@ -211,6 +211,11 @@ class MessageServer:
                     link = self._link
             if busy:
                 try:
+                    conn.sendall(protocol.encode(protocol.pair_err("busy")))
+                    conn.shutdown(socket.SHUT_RDWR)
+                except OSError:
+                    pass
+                try:
                     conn.close()
                 except OSError:
                     pass
