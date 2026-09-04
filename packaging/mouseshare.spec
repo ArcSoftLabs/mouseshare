@@ -1,4 +1,4 @@
-# PyInstaller spec: windowed app for macOS and Windows.
+# PyInstaller spec: windowed app for macOS, Windows, and Linux.
 # Build with:  pyinstaller packaging/mouseshare.spec
 #
 # Windows gets a one-file .exe. macOS gets a onedir .app bundle: PyInstaller
@@ -9,19 +9,30 @@ import sys
 
 ROOT = os.path.join(SPECPATH, "..")
 
+hiddenimports = [
+    "pynput.keyboard._win32", "pynput.mouse._win32",
+    "pynput.keyboard._darwin", "pynput.mouse._darwin",
+    "webview.platforms.winforms",
+    "webview.platforms.edgechromium",
+    "webview.platforms.cocoa",
+]
+if sys.platform == "linux":
+    hiddenimports += [
+        "pynput.keyboard._xorg",
+        "pynput.mouse._xorg",
+        "Xlib.ext.xtest",
+        "Xlib.ext.record",
+        "webview.platforms.gtk",
+        "gi.overrides.Gtk",
+    ]
+
 a = Analysis(
     [os.path.join(SPECPATH, "entry.py")],
     pathex=[ROOT],
     binaries=[],
     # The UI ships as data and is resolved through sys._MEIPASS at runtime.
     datas=[(os.path.join(ROOT, "mouseshare", "ui", "web"), "mouseshare/ui/web")],
-    hiddenimports=[
-        "pynput.keyboard._win32", "pynput.mouse._win32",
-        "pynput.keyboard._darwin", "pynput.mouse._darwin",
-        "webview.platforms.winforms",
-        "webview.platforms.edgechromium",
-        "webview.platforms.cocoa",
-    ],
+    hiddenimports=hiddenimports,
     hookspath=[],
     runtime_hooks=[],
     excludes=["tkinter"],
@@ -68,6 +79,7 @@ if sys.platform == "darwin":
         },
     )
 else:
+    icon = None if sys.platform == "linux" else os.path.join(ICONS, "MouseShare.ico")
     exe = EXE(
         pyz,
         a.scripts,
@@ -75,7 +87,7 @@ else:
         a.zipfiles,
         a.datas,
         name="mouseshare",
-        icon=os.path.join(ICONS, "MouseShare.ico"),
+        icon=icon,
         debug=False,
         strip=False,
         upx=False,

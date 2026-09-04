@@ -35,7 +35,7 @@ def smoke() -> int:
     """
     checks, failed = [], False
     index = os.path.join(web_dir(), "index.html")
-    for name, probe in (
+    probes = [
         ("bundled UI", lambda: index if os.path.exists(index) else _missing(index)),
         # No `importlib.metadata` version check: a frozen app ships modules
         # without package metadata, so asking for a version there fails on
@@ -44,7 +44,10 @@ def smoke() -> int:
         ("zeroconf", _probe_zeroconf),
         ("monitors", _probe_monitors),
         ("pynput", _probe_pynput),
-    ):
+    ]
+    if sys.platform.startswith("linux"):
+        probes.append(("Linux session", _probe_linux_session))
+    for name, probe in probes:
         try:
             checks.append(f"PASS  {name}: {probe()}")
         except Exception as exc:  # noqa: BLE001
@@ -97,17 +100,28 @@ def _probe_monitors() -> str:
 
 
 def _probe_pynput() -> str:
-    try:
-        from pynput import keyboard, mouse
-    except ImportError as exc:
-        if sys.platform.startswith("linux") and not os.environ.get("DISPLAY"):
-            return f"unavailable without DISPLAY: {exc}"
-        raise
+    if sys.platform.startswith("linux"):
+        import importlib
+
+        importlib.import_module("pynput.mouse._xorg")
+        importlib.import_module("pynput.keyboard._xorg")
+        display_module = importlib.import_module("Xlib.display")
+        display = display_module.Display()
+        display.close()
+        return "pynput.mouse._xorg, pynput.keyboard._xorg; display open"
+
+    from pynput import keyboard, mouse
 
     # A CI runner has no input session, so a denial here is expected and is
     # not what this probe is for -- it is checking that the platform
     # backends were bundled and import.
     return f"{mouse.Listener.__module__}, {keyboard.Listener.__module__}"
+
+
+def _probe_linux_session() -> str:
+    from . import linux
+
+    return linux.session_type()
 
 
 def log_path() -> str:

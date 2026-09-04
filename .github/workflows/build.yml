@@ -34,13 +34,24 @@ jobs:
           - os: windows-latest
             artifact: MouseShare-windows
             smoke: ./dist/mouseshare.exe --smoke
+          - os: ubuntu-22.04
+            artifact: MouseShare-linux
+            smoke: xvfb-run -a ./dist/mouseshare --smoke
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
+      - name: Install Linux build dependencies
+        if: matrix.os == 'ubuntu-22.04'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libcairo2-dev libgtk-3-dev libwebkit2gtk-4.0-dev libgirepository1.0-dev gir1.2-gtk-3.0 gir1.2-webkit2-4.0 xvfb
       - run: pip install . pyinstaller
+      - name: Install the Linux GTK Python bindings for bundling
+        if: matrix.os == 'ubuntu-22.04'
+        run: pip install PyGObject==3.46.0
       - run: pyinstaller packaging/mouseshare.spec
       # Run the frozen app, not just check a path exists. This is what
       # catches a missing hidden import, an unbundled web asset, or a
@@ -57,6 +68,29 @@ jobs:
       - name: Archive the app bundle on the runner
         if: matrix.os == 'macos-latest'
         run: ditto -c -k --keepParent dist/MouseShare.app dist/MouseShare-macos.zip
+      - name: Build the Linux AppImage
+        if: matrix.os == 'ubuntu-22.04'
+        run: bash packaging/linux/build-appimage.sh
+      - name: Smoke-test the Linux AppImage
+        if: matrix.os == 'ubuntu-22.04'
+        run: APPIMAGE_EXTRACT_AND_RUN=1 xvfb-run -a ./dist/MouseShare-x86_64.AppImage --smoke
+      - name: Install nFPM
+        if: matrix.os == 'ubuntu-22.04'
+        shell: bash
+        run: |
+          curl -fsSL https://github.com/goreleaser/nfpm/releases/download/v2.47.0/nfpm_2.47.0_Linux_x86_64.tar.gz -o dist/nfpm.tar.gz
+          echo "0660ca602b2d2d2ae4781a06c692b3eeb9d437ffea05b831d76e41f4a3188783  dist/nfpm.tar.gz" | sha256sum --check
+          tar -xzf dist/nfpm.tar.gz -C dist nfpm
+      - name: Build Linux packages and tarball
+        if: matrix.os == 'ubuntu-22.04'
+        shell: bash
+        run: |
+          VERSION="$(sed -n 's/^version = "\([^"]*\)"/\1/p' pyproject.toml)"
+          export VERSION
+          ./dist/nfpm package -f packaging/linux/nfpm.yaml -p deb -t "dist/mouseshare_${VERSION}_amd64.deb"
+          ./dist/nfpm package -f packaging/linux/nfpm.yaml -p rpm -t "dist/mouseshare-${VERSION}-1.x86_64.rpm"
+          tar -czf dist/MouseShare-linux-x86_64.tar.gz -C dist mouseshare -C ../packaging/linux mouseshare.desktop -C ../icons MouseShare.png
+          rm dist/mouseshare dist/appimagetool-x86_64.AppImage dist/runtime-x86_64 dist/nfpm dist/nfpm.tar.gz
       - uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.artifact }}
@@ -82,3 +116,7 @@ jobs:
           files: |
             artifacts/MouseShare-macos/MouseShare-macos.zip
             artifacts/MouseShare-windows.zip
+            artifacts/MouseShare-linux/MouseShare-x86_64.AppImage
+            artifacts/MouseShare-linux/*.deb
+            artifacts/MouseShare-linux/*.rpm
+            artifacts/MouseShare-linux/MouseShare-linux-x86_64.tar.gz

@@ -172,6 +172,7 @@ def main() -> int:
     for size, name in ICNS_NAMES:
         images[size].save(os.path.join(iconset, name))
     images[1024].save(os.path.join(OUT, "icon.png"))
+    images[256].save(os.path.join(OUT, "MouseShare.png"))
     write_ico(images, os.path.join(OUT, "MouseShare.ico"))
 
     print(f"wrote {OUT}")
@@ -179,6 +180,7 @@ def main() -> int:
     print(f"  MouseShare.iconset/ ({len(ICNS_NAMES)} files; iconutil turns "
           f"this into MouseShare.icns on a Mac)")
     print("  icon.png            (1024, for anywhere else)")
+    print("  MouseShare.png       (256, for Linux desktop packaging)")
     return 0
 
 

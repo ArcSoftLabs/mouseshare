@@ -1,8 +1,8 @@
 # MouseShare
 
-Share one keyboard and mouse between a Mac and a Windows PC. Move the
-cursor off the edge of one screen and it appears on the other, with the
-keyboard following it.
+Share one keyboard and mouse between macOS, Windows, and Linux computers.
+Move the cursor off the edge of one screen and it appears on the other, with
+the keyboard following it.
 
 Install it on both machines, find the other one on your network, type the
 code it shows you, then drag the screens into the arrangement you actually
@@ -22,6 +22,9 @@ Download the build for each machine from
   launch needs right-click → Open. macOS will then ask for **Accessibility**
   and **Input Monitoring**; MouseShare cannot read or forward input without
   both. Settings shows their status if you skip the prompt.
+- **Linux** — choose the AppImage, `.deb`, `.rpm`, or tarball. Linux support is
+  X11-only; see the [Linux install guide](docs/linux-install.md) for runtime
+  packages, session selection, and firewall setup.
 
 ## Use
 
@@ -85,8 +88,8 @@ pairing, layout, transport, session and state logic are all covered there.
 Input capture, injection and monitor enumeration are platform code and are
 verified by hand.
 
-To check an install without opening a window — CI runs this inside the
-packaged app on both platforms:
+To check an install without opening a window — CI runs this inside each
+packaged app:
 
 ```sh
 mouseshare --smoke
@@ -112,5 +115,6 @@ Before tagging, on both real machines:
 ## Limits
 
 Two machines, one at a time. No clipboard sharing, no file transfer, no
-keyboard remapping, no Linux build. Closing the window quits — minimize it
-to keep sharing.
+keyboard remapping. Linux is supported on X11 only; native Wayland capture
+and injection are unsupported — see the [Linux install guide](docs/linux-install.md).
+Closing the window quits — minimize it to keep sharing.

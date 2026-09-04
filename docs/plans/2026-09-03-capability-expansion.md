@@ -332,3 +332,5 @@ GUI launch via `open`); Windows runs via `py.exe`; Linux via WSLg.
 - [x] C1 — platform clipboard backends and availability factory.
 - [x] C2 — capability-gated clipboard synchronisation and relay.
 - [x] L1 — first-class X11 capture/injection, XDG paths, and explicit Wayland refusal.
+- [x] L2 — Linux PyInstaller, AppImage, deb/rpm, tarball, CI artifacts, and smoke tests.
+- [x] L3 — Linux install, dependency, X11, firewall, path, and troubleshooting docs.

@@ -1,0 +1,7 @@
+[Desktop Entry]
+Type=Application
+Name=MouseShare
+Exec=mouseshare
+Icon=mouseshare
+Categories=Utility;
+Terminal=false

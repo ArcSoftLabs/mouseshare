@@ -1,0 +1,28 @@
+name: mouseshare
+arch: amd64
+platform: linux
+version: ${VERSION}
+maintainer: ArcSoft Labs <arcsoftlabs@users.noreply.github.com>
+description: Share one keyboard and mouse between computers on a local network.
+license: MIT
+homepage: https://github.com/ArcSoftLabs/mouseshare
+contents:
+  - src: dist/mouseshare
+    dst: /usr/bin/mouseshare
+    file_info:
+      mode: 0755
+  - src: packaging/linux/mouseshare.desktop
+    dst: /usr/share/applications/mouseshare.desktop
+  - src: packaging/icons/MouseShare.png
+    dst: /usr/share/icons/hicolor/256x256/apps/mouseshare.png
+overrides:
+  deb:
+    depends:
+      - libgtk-3-0
+      - libwebkit2gtk-4.1-0 | libwebkit2gtk-4.0-37
+      - gir1.2-gtk-3.0
+      - gir1.2-webkit2-4.1 | gir1.2-webkit2-4.0
+  rpm:
+    depends:
+      - gtk3
+      - webkit2gtk4.1
