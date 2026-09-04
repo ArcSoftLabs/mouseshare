@@ -324,6 +324,9 @@ GUI launch via `open`); Windows runs via `py.exe`; Linux via WSLg.
   Connectors send `pair_request` as v2 with `max_v:3`; responders pin the advertised maximum and connectors pin the reply version.
 - [x] A1 — local escape gesture, release re-warp, and listener-death recovery.
 - [x] A0 — Mac tap probe run 2026-09-04: H1 confirmed, H2 refuted, delta fields usable (`docs/plans/reports/A0.md`).
+- [x] A2 — macOS delta-field and cursor-drift regression tests.
+- [x] A3 — macOS delta-field capture, cursor decoupling, and tap recovery.
+- [x] A4 — AppKit-to-Quartz multi-display origin conversion.
 - [x] M1 — multi-link host transport and explicit busy/duplicate/full refusal.
 - [x] M2 — per-link app handshake/session state and selective teardown.
 - [x] M3 — N-peer cursor routing, deterministic corners, and live topology recovery.

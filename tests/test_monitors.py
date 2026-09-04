@@ -1,3 +1,6 @@
+import sys
+import types
+
 from mouseshare import monitors
 from mouseshare.layout import Monitor
 
@@ -50,3 +53,52 @@ def test_monitors_serialise_for_the_wire_and_back():
         Monitor("pc", "1", -1920, 0, 1920, 1080),
     ]
     assert monitors.from_wire("pc", monitors.to_wire(original)) == original
+
+
+def test_appkit_single_primary_is_already_in_quartz_coordinates():
+    screens = [FakeScreen(0, 0, 2560, 1440, is_primary=True)]
+    converted = monitors.appkit_to_quartz(screens)
+    assert [(s.x, s.y, s.width, s.height) for s in converted] == [
+        (0, 0, 2560, 1440)
+    ]
+
+
+def test_appkit_bottom_aligned_secondary_moves_down_in_quartz():
+    screens = [
+        FakeScreen(0, 0, 2560, 1440, is_primary=True),
+        FakeScreen(2560, 0, 1920, 1080),
+    ]
+    converted = monitors.appkit_to_quartz(screens)
+    assert converted[1].y == 360
+
+
+def test_appkit_secondary_above_primary_gets_negative_quartz_origin():
+    screens = [
+        FakeScreen(0, 0, 2560, 1440, is_primary=True),
+        FakeScreen(0, 1440, 1920, 1080),
+    ]
+    converted = monitors.appkit_to_quartz(screens)
+    assert converted[1].y == -1080
+
+
+def test_appkit_top_aligned_secondary_has_zero_quartz_y():
+    screens = [
+        FakeScreen(0, 0, 2560, 1440, is_primary=True),
+        FakeScreen(2560, 360, 1920, 1080),
+    ]
+    converted = monitors.appkit_to_quartz(screens)
+    assert converted[1].y == 0
+
+
+def test_enumerate_local_only_converts_appkit_coordinates_on_darwin(monkeypatch):
+    fake_screeninfo = types.SimpleNamespace(get_monitors=lambda: [
+        FakeScreen(0, 0, 2560, 1440, is_primary=True),
+        FakeScreen(2560, 0, 1920, 1080),
+    ])
+    monkeypatch.setitem(sys.modules, "screeninfo", fake_screeninfo)
+
+    monkeypatch.setattr(sys, "platform", "darwin")
+    assert monitors.enumerate_local("mac")[1].y == 360
+
+    monkeypatch.setattr(sys, "platform", "win32")
+    assert monitors.enumerate_local("pc")[1].y == 0

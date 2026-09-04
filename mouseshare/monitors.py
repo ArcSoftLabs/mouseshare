@@ -9,6 +9,8 @@ Whether those numbers agree with `pynput`'s idea of a cursor position under
 DPI scaling and Retina is a platform question that only a real machine can
 answer; see the release checklist in the design spec.
 """
+import sys
+from types import SimpleNamespace
 from typing import Any, Dict, List
 
 from .layout import Monitor
@@ -39,6 +41,24 @@ def from_screens(device_id: str, screens: List[Any]) -> List[Monitor]:
 FALLBACK = Monitor("", "0", 0, 0, 1920, 1080, primary=True)
 
 
+def appkit_to_quartz(screens: List[Any]) -> List[Any]:
+    """Convert AppKit's bottom-left frames to Quartz's top-left space."""
+    if not screens:
+        return []
+    primary_h = int(screens[0].height)
+    return [
+        SimpleNamespace(
+            x=s.x,
+            y=primary_h - (s.y + s.height),
+            width=s.width,
+            height=s.height,
+            is_primary=getattr(s, "is_primary", False),
+            name=getattr(s, "name", None),
+        )
+        for s in screens
+    ]
+
+
 def enumerate_local(device_id: str) -> List[Monitor]:
     """This machine's monitors, or one assumed screen.
 
@@ -50,7 +70,10 @@ def enumerate_local(device_id: str) -> List[Monitor]:
     try:
         from screeninfo import get_monitors
 
-        found = from_screens(device_id, get_monitors())
+        screens = get_monitors()
+        if sys.platform == "darwin":
+            screens = appkit_to_quartz(screens)
+        found = from_screens(device_id, screens)
     except Exception:  # noqa: BLE001 - any backend failure means "unknown"
         found = []
     if found:

@@ -26,7 +26,10 @@ Platform mechanics, verified against the pynput 1.8.2 sources:
   combinations are not lost.
 
 - **macOS.** `_handler` dispatches callbacks *before* consulting
-  `darwin_intercept`, so the normal handlers keep firing while suppressing.
+  `darwin_intercept`. Deleting an event does not stop the cursor sprite, and
+  its location keeps integrating even while the sprite is decoupled. Remote
+  movement therefore comes from the raw event's integer delta fields in the
+  intercept; injected events pass through, and zero deltas are ignored.
 
 - **Linux/X11.** Listeners never use pynput's all-or-nothing `suppress`;
   remote mode takes explicit pointer and keyboard grabs. Pointer motion is
@@ -173,6 +176,10 @@ class InputCapture:
         self._start_mouse(mouse)
         self._start_keyboard(keyboard)
         self._start_watchdog()
+        if sys.platform == "darwin":
+            import atexit
+
+            atexit.register(self._darwin_reassociate)
 
     def set_escape_key(self, key: str) -> None:
         self._escape_key = key
@@ -191,13 +198,21 @@ class InputCapture:
         self._anchor = (int(anchor[0]), int(anchor[1]))
         self._limit = int(limit)
         self._escape = EscapeDetector(self._escape_key, ESCAPE_WINDOW)
-        self._controller.position = self._anchor
+        if sys.platform == "darwin":
+            import Quartz
+
+            Quartz.CGWarpMouseCursorPosition(self._anchor)
+            Quartz.CGAssociateMouseAndMouseCursorPosition(False)
+        else:
+            self._controller.position = self._anchor
         if sys.platform.startswith("linux"):
             self._linux_grab.grab()
         self.suppressing = True
 
     def stop_remote(self) -> None:
         self.suppressing = False
+        if sys.platform == "darwin":
+            self._darwin_reassociate()
         if self._linux_grab is not None:
             try:
                 self._linux_grab.ungrab()
@@ -209,10 +224,12 @@ class InputCapture:
 
         Windows suppression keeps the real cursor parked. Under an X11
         grab it moves, so every physical event queues a warp outside the
-        callback; the resulting anchor event is ignored. A warp must not
-        happen inside the callback because it returns as another event,
-        and Windows stops calling a hook that cannot keep up at a thousand
-        reports a second.
+        callback; the resulting anchor event is ignored. macOS does not use
+        this path: deleting events leaves the cursor moving, decoupling does
+        not stop event locations integrating, and its usable integer deltas
+        are read from the raw event. Posting inside its tap is safe but does
+        not park the sprite. Windows still stops calling a hook that cannot
+        keep up with a warp for every report.
         """
         dx, dy = x - self._anchor[0], y - self._anchor[1]
         if max(abs(dx), abs(dy)) > self._limit:
@@ -230,12 +247,7 @@ class InputCapture:
                 self._queue_linux_warp()
 
     def stop(self) -> None:
-        self.suppressing = False
-        if self._linux_grab is not None:
-            try:
-                self._linux_grab.ungrab()
-            except Exception as exc:  # noqa: BLE001 - still stop listeners
-                log.warning("could not release X11 input grab: %s", type(exc).__name__)
+        self.stop_remote()
         self._watchdog_stop.set()
         if self._linux_warps is not None:
             # The queue holds one slot; a dead worker must not hang shutdown.
@@ -303,7 +315,7 @@ class InputCapture:
                     for listener in listeners
                 ):
                     was_suppressing = self.suppressing
-                    self.suppressing = False
+                    self.stop_remote()
                     if was_suppressing:
                         try:
                             self._on_capture_lost()
@@ -321,12 +333,11 @@ class InputCapture:
     def _start_mouse(self, mouse) -> None:
         def handle_move(x, y, *_):
             if self.suppressing:
-                # macOS and X11 callbacks fire even for suppressed events.
-                # Untested as a host. This assumes the intercept leaves
-                # the real cursor parked, as suppression does on Windows;
-                # if it does not, the offsets accumulate and the peer
-                # cursor runs away in whatever direction it was going.
-                self._moved(int(x), int(y))
+                # macOS callbacks expose an integrating location even while
+                # the cursor sprite is decoupled. Its raw deltas are handled
+                # later by the intercept; X11 still measures from the anchor.
+                if sys.platform != "darwin":
+                    self._moved(int(x), int(y))
             else:
                 self._on_move(int(x), int(y))
 
@@ -366,7 +377,7 @@ class InputCapture:
 
             kwargs["win32_event_filter"] = win32_event_filter
         elif sys.platform == "darwin":
-            kwargs["darwin_intercept"] = self._darwin_intercept
+            kwargs["darwin_intercept"] = self._darwin_mouse_intercept
         elif sys.platform.startswith("linux"):
             # X11 suppression is toggled with XGrab in start_remote; a
             # pynput suppress=True listener would grab for its whole life.
@@ -378,6 +389,8 @@ class InputCapture:
             on_scroll=handle_scroll,
             **kwargs,
         )
+        if sys.platform == "darwin":
+            self._remember_darwin_tap(self._mouse_listener)
         self._mouse_listener.start()
 
     # -- keyboard ------------------------------------------------------------
@@ -437,6 +450,8 @@ class InputCapture:
         self._key_listener = keyboard.Listener(
             on_press=handle_press, on_release=handle_release, **kwargs
         )
+        if sys.platform == "darwin":
+            self._remember_darwin_tap(self._key_listener)
         self._key_listener.start()
 
     # -- shared --------------------------------------------------------------
@@ -445,15 +460,73 @@ class InputCapture:
         if self._consume_current:
             self._consume_current = False
             return None
-        return self._darwin_intercept(event_type, event)
-
-    def _darwin_intercept(self, event_type, event):
-        if not self.suppressing:
-            return event
         import Quartz
 
+        if event_type in (0xFFFFFFFE, 0xFFFFFFFF):
+            self._reenable_darwin_tap(Quartz, self._key_listener)
+            return event
+        if not self.suppressing:
+            return event
         if Quartz.CGEventGetIntegerValueField(
             event, Quartz.kCGEventSourceUnixProcessID
         ) != 0:
             return event  # injected by us; let it through
         return None  # swallow the real event
+
+    def _darwin_mouse_intercept(self, event_type, event):
+        import Quartz
+
+        if event_type in (0xFFFFFFFE, 0xFFFFFFFF):
+            self._reenable_darwin_tap(Quartz, self._mouse_listener)
+            return event
+        if not self.suppressing:
+            return event
+        if Quartz.CGEventGetIntegerValueField(
+            event, Quartz.kCGEventSourceUnixProcessID
+        ) != 0:
+            return event  # injected by us; let it through
+        moved = {
+            Quartz.kCGEventMouseMoved,
+            Quartz.kCGEventLeftMouseDragged,
+            Quartz.kCGEventRightMouseDragged,
+            Quartz.kCGEventOtherMouseDragged,
+        }
+        if event_type in moved:
+            dx = Quartz.CGEventGetIntegerValueField(
+                event, Quartz.kCGMouseEventDeltaX
+            )
+            dy = Quartz.CGEventGetIntegerValueField(
+                event, Quartz.kCGMouseEventDeltaY
+            )
+            if (dx, dy) != (0, 0):
+                self._on_delta(dx, dy)
+        return None  # swallow the real event
+
+    @staticmethod
+    def _reenable_darwin_tap(Quartz, listener) -> None:
+        tap = getattr(listener, "_ms_tap", None)
+        if tap is not None:
+            Quartz.CGEventTapEnable(tap, True)
+
+    @staticmethod
+    def _remember_darwin_tap(listener) -> None:
+        listener._ms_tap = None
+        if not hasattr(listener, "_create_event_tap"):
+            return
+        original = listener._create_event_tap
+
+        def create_event_tap():
+            tap = original()
+            listener._ms_tap = tap
+            return tap
+
+        listener._create_event_tap = create_event_tap
+
+    @staticmethod
+    def _darwin_reassociate() -> None:
+        try:
+            import Quartz
+
+            Quartz.CGAssociateMouseAndMouseCursorPosition(True)
+        except Exception as exc:  # noqa: BLE001 - best-effort emergency release
+            log.warning("could not re-associate macOS cursor: %s", type(exc).__name__)
