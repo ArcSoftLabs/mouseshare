@@ -8,20 +8,23 @@ Install it on both machines, find the other one on your network, type the
 code it shows you, then drag the screens into the arrangement you actually
 have. That is the whole setup.
 
+MouseShare supports one host with up to eight connected clients. It shares
+keyboard and pointer input, text clipboards, and files across Windows, macOS,
+and Linux X11.
+
 ## Install
 
 Download the build for each machine from
 [Releases](https://github.com/ArcSoftLabs/mouseshare/releases) and run it.
 
-- **Windows** — `mouseshare.exe`. Needs the WebView2 runtime, which is
-  already present on Windows 11 and on any updated Windows 10. On first
-  launch Windows Firewall asks whether to allow it on public and private
-  networks: **allow it**, or the two machines cannot find or reach each
-  other. The build is unsigned, so SmartScreen may also warn.
+- **Windows** — `mouseshare.exe`. See the
+  [Windows install guide](docs/windows-install.md) for WebView2, SmartScreen,
+  and firewall setup.
 - **macOS** — `MouseShare.app`. The builds are unsigned, so the first
   launch needs right-click → Open. macOS will then ask for **Accessibility**
   and **Input Monitoring**; MouseShare cannot read or forward input without
-  both. Settings shows their status if you skip the prompt.
+  both. Settings shows their status if you skip the prompt. See the
+  [macOS install guide](docs/mac-install.md).
 - **Linux** — choose the AppImage, `.deb`, `.rpm`, or tarball. Linux support is
   X11-only; see the [Linux install guide](docs/linux-install.md) for runtime
   packages, session selection, and firewall setup.
@@ -34,12 +37,23 @@ Download the build for each machine from
 3. The other machine shows a six-digit code. Type it into the first one.
    You are asked once per pair of machines; after that they recognise each
    other automatically.
-4. Under **Layout**, drag the two machines into the positions their screens
+4. Under **Layout**, drag the machines into the positions their screens
    really sit in. Edges snap together.
 
 Move the cursor past a shared edge and it crosses. Move it back and it
-returns. The code is asked for once; after that the two machines recognise
-each other automatically.
+returns. The code is asked for once; after that the machines recognise each
+other automatically. Connect more devices the same way, up to eight clients
+on one host, then arrange all of them under **Layout**.
+
+Text copied on a connected device is shared automatically when clipboard
+sharing is enabled. To transfer files, drop them onto the MouseShare window or
+use **Send files**, choose a connected device, and follow progress in the app.
+Received files are saved under `~/Downloads/MouseShare`.
+
+If input ever appears stuck on another device, double-tap Ctrl within 0.5
+seconds on Windows or Linux, or double-tap Cmd on macOS. This immediately
+leaves remote mode and returns the pointer to the host. The escape modifier is
+configurable in Settings.
 
 ## How it works
 
@@ -112,9 +126,17 @@ Before tagging, on both real machines:
 - [ ] Windows Firewall was allowed for the app, and the Mac granted the
       local-network prompt.
 
-## Limits
+## Known limitations
 
-Two machines, one at a time. No clipboard sharing, no file transfer, no
-keyboard remapping. Linux is supported on X11 only; native Wayland capture
-and injection are unsupported — see the [Linux install guide](docs/linux-install.md).
-Closing the window quits — minimize it to keep sharing.
+- Linux is supported on X11 only. Native Wayland cannot provide the global
+  input grab and pointer warp MouseShare needs without a compositor-specific
+  portal; see the [Linux install guide](docs/linux-install.md).
+- Mixed-DPI layouts are not scale-normalized. A macOS point and a Windows
+  physical pixel occupy equal space in the layout plane, so cursor speed and
+  edge alignment can shift across differently scaled displays.
+- macOS multi-display origins are still pending. Setups with displays left of
+  or above the primary may map to the wrong rows.
+- Native cross-boundary drag-and-drop is under evaluation. Version 0.3.0 ships
+  the in-window drop zone and **Send files** picker; see
+  [file-transfer.md](docs/file-transfer.md) for the probe status.
+- Closing the window quits; minimize it to keep sharing.
