@@ -7,6 +7,11 @@
 4. `pyproject.toml` / `.github/workflows/build.yml`: explicit ruff rule selection and version pin (H2). Commit 1ee4877.
 5. `tests/test_transfer.py` `test_one_mib_transfer_streams_with_bounded_sender_and_receiver_memory`: the peak bound is `512 KiB + 2 * io.DEFAULT_BUFFER_SIZE` (F1 rework 2). Python 3.14 on Windows opens files with a 128 KiB buffer (8 KiB on Linux 3.10) and the transfer holds two handles; Sol's flat 512 KiB failed on `py.exe` at ~675 KB. A hoarding-receiver probe still trips the new bound on both platforms. Also note: Sol lowered `ACK_EVERY` 8→4 in `transfer.py` for the memory bound without being asked; reviewed in the round-2 delta review and ratified (the F1 brief said "e.g. 8"; LAN throughput is encode-bound). Controller also added `or send.failed` to the chunk-loop guard in `_run_send` (round-2 delta finding: after a remote `xfer_error` the sender kept emitting up to ACK_EVERY-1 chunks).
 
+6. `mouseshare/app.py` `_default_offset`: the no-arg form (used by the pairing persist path) now counts offline peers with a saved offset, mirroring `_build_layout` (D2 final review, 2026-09-04: a first pairing was persisted on top of an offline placed peer). Test extended: `test_default_offsets_use_only_placed_devices`.
+
+## D2 final integration review (2026-09-04, ~12:50)
+Hunks 1, 3, 4, 5 confirmed present and OK; hunk 2 fixed as item 6. No deadlock found across `App._lock`, `TransferManager._lock`, `send.acked` and the state locks; teardown cleans clipboard, transfers and routing. A v0.2.0 peer never receives v3-only frames (all gated on caps it never sends). Minor hardening left open: gate `_set_caps` on `peer.version >= 3` (currently caps-gated only); `TransferManager.receive` does not check that the message's peer owns the transfer id (ids are uuid4 and never relayed); no test asserts a peer's caps change after the `layout` re-broadcast when a share setting is toggled; nothing asserts the sender stops after a remote `xfer_error`.
+
 ## Known caveats carried in the plan doc
 - First outbound `pair_request` is encoded v3; a strict v2 decoder rejects it (P1 progress note). Live test against the Mac's v0.2.0 planned/performed — see LIVE-V2 notes.
 - Mixed DPI documented as a limitation (D1).

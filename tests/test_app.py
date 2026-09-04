@@ -1007,3 +1007,6 @@ def test_default_offsets_use_only_placed_devices(tmp_path):
     assert layout.offsets["second"] == (100, 0)
     assert layout.offsets["first"] == (3100, 0)
     assert layout.can_place("first", layout.offsets["first"])
+    # The default persisted at pairing time must agree with the layout, so a
+    # newly paired device is not saved on top of the offline one.
+    assert instance._default_offset() == (3100, 0)

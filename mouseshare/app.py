@@ -971,8 +971,13 @@ class App:
         peer_monitors: Optional[dict[str, list]] = None,
         offsets: Optional[dict[str, tuple[int, int]]] = None,
     ) -> tuple[int, int]:
-        peer_monitors = peer_monitors if peer_monitors is not None else {
-            p.device_id: p.monitors for p in self._peers.values() if p.monitors}
+        if peer_monitors is None:
+            # Mirror _build_layout: offline peers with a saved place count too,
+            # or a first pairing would be persisted on top of one of them.
+            peer_monitors = {device_id: self._known_monitors.get(device_id, [])
+                             for device_id in self.cfg.peers}
+            peer_monitors.update({p.device_id: p.monitors
+                                  for p in self._peers.values() if p.monitors})
         offsets = offsets if offsets is not None else self.cfg.offsets
         # Only devices that already have a place count, otherwise a peer
         # still waiting for its default would sit at x=0 and shift the box.
