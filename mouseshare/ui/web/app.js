@@ -136,7 +136,14 @@ function renderPairing() {
 function renderLayout() {
   const canvas = $('#canvas');
   const devices = (state.layout && state.layout.devices) || [];
-  const screens = devices.flatMap((d) => d.monitors);
+  const displayed = devices.map((d) => ({
+    ...d,
+    monitors: d.monitors.length ? d.monitors : [{
+      id: 'unknown', x: d.offset[0], y: d.offset[1], w: 640, h: 360, primary: true,
+    }],
+  }));
+  const screens = displayed.flatMap((d) => d.monitors);
+  $('#client-layout-hint').hidden = state.session?.role !== 'client';
   $('#layout-hint').hidden = devices.length > 1;
   canvas.hidden = devices.length === 0;
   if (!screens.length) { canvas.innerHTML = ''; return; }
@@ -156,13 +163,16 @@ function renderLayout() {
   const originY = (canvas.clientHeight - (maxY - minY) * scale) / 2 - minY * scale;
 
   canvas.innerHTML = '';
-  for (const device of devices) {
+  for (const device of displayed) {
     const dMinX = Math.min(...device.monitors.map((m) => m.x));
     const dMinY = Math.min(...device.monitors.map((m) => m.y));
     const dMaxX = Math.max(...device.monitors.map((m) => m.x + m.w));
     const dMaxY = Math.max(...device.monitors.map((m) => m.y + m.h));
 
-    const block = el('div', 'block' + (device.device_id === state.device.id ? ' self' : ''));
+    const block = el('div', 'block' +
+      (device.device_id === state.device.id ? ' self' : '') +
+      (device.connected ? ' live' : '') +
+      (device.draggable ? '' : ' fixed'));
     block.style.left = originX + dMinX * scale + 'px';
     block.style.top = originY + dMinY * scale + 'px';
     block.style.width = (dMaxX - dMinX) * scale + 'px';
@@ -179,7 +189,9 @@ function renderLayout() {
       block.appendChild(screen);
     }
 
-    block.addEventListener('pointerdown', (ev) => startDrag(ev, block, device, scale));
+    if (device.draggable) {
+      block.addEventListener('pointerdown', (ev) => startDrag(ev, block, device, scale));
+    }
     canvas.appendChild(block);
   }
 }

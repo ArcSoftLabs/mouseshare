@@ -323,3 +323,7 @@ GUI launch via `open`); Windows runs via `py.exe`; Linux via WSLg.
 - [x] A1 — local escape gesture, release re-warp, and listener-death recovery.
 - [x] M1 — multi-link host transport and explicit busy/duplicate/full refusal.
 - [x] M2 — per-link app handshake/session state and selective teardown.
+- [x] M3 — N-peer cursor routing, deterministic corners, and live topology recovery.
+- [x] M4 — N-device layout placement and editor rendering. The live-device ring also
+  appears in the two-device view, trading exact legacy rendering for consistent status.
+- [x] M5 — four-device loopback routing and recovery coverage.

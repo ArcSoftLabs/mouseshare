@@ -84,6 +84,7 @@ class App:
         self._found: dict = {}
         self._peers: dict[str, _Peer] = {}
         self._handshakes: list[_Peer] = []
+        self._known_monitors: dict[str, list] = {}
         # The server accepts one inbound socket at a time; remember which
         # per-peer record owns it so refused links cannot disturb sessions.
         self._inbound_peer: Optional[_Peer] = None
@@ -282,6 +283,7 @@ class App:
     def forget(self, peer_id: str) -> dict:
         self.cfg.peers.pop(peer_id, None)
         self.cfg.offsets.pop(peer_id, None)
+        self._known_monitors.pop(peer_id, None)
         config.save(self.cfg, self._cfg_path)
         self._publish_peers()
         return self.state.snapshot()
@@ -292,9 +294,7 @@ class App:
         if layout:
             previous = self.cfg.offsets.get(device_id, (0, 0))
             layout.set_offset(device_id, (int(x), int(y)))
-            anchor = next((d for d in layout.device_ids() if d != device_id), None)
-            if anchor:
-                layout.snap_device(device_id, anchor)
+            layout.snap_device(device_id)
             if not layout.can_place(device_id, layout.offsets[device_id]):
                 layout.set_offset(device_id, previous)
                 self.state.set(error="Those screens would overlap, so the move was undone.",
@@ -485,6 +485,11 @@ class App:
         elif kind == "layout":
             self._set_caps(peer, msg)
             peer.monitors = monitors.from_wire(peer.device_id, msg["monitors"])
+            self._known_monitors[peer.device_id] = peer.monitors
+            if self._host:
+                layout = self._build_layout()
+                if layout is not None:
+                    self._host.update_layout(layout)
             self._start_heartbeat(peer)
             self._publish_session()
         elif kind == "ping" and "heartbeat" in peer.caps:
@@ -635,6 +640,7 @@ class App:
             return
         peer.name = msg.get("name", "")
         peer.monitors = monitors.from_wire(peer.device_id, msg["monitors"])
+        self._known_monitors[peer.device_id] = peer.monitors
         self._set_caps(peer, msg)
         saved = self.cfg.peers.get(peer.device_id)
         address, port = getattr(peer.link, "_addr", ("", 0))
@@ -701,8 +707,8 @@ class App:
             self._host.capture = self._capture
             self._capture.start()
         else:
-            self._host.layout = layout
             self._host.add_peer(peer.device_id, peer.monitors)
+            self._host.update_layout(layout)
         peer.outbox.put(protocol.layout(monitors.to_wire(self.monitors)))
         self._start_heartbeat(peer)
         self._publish_session("", "layout")
@@ -790,33 +796,65 @@ class App:
 
     # -- roles ---------------------------------------------------------------
 
-    def _default_offset(self) -> tuple[int, int]:
-        right = max((m.x + m.w for m in self.monitors), default=1920)
-        left = min((m.x for m in self.monitors), default=0)
-        return right - left, 0
+    def _default_offset(
+        self,
+        peer_monitors: Optional[dict[str, list]] = None,
+        offsets: Optional[dict[str, tuple[int, int]]] = None,
+    ) -> tuple[int, int]:
+        peer_monitors = peer_monitors if peer_monitors is not None else {
+            p.device_id: p.monitors for p in self._peers.values() if p.monitors}
+        offsets = offsets if offsets is not None else self.cfg.offsets
+        # Only devices that already have a place count, otherwise a peer
+        # still waiting for its default would sit at x=0 and shift the box.
+        placed = [(self.cfg.device_id, self.monitors)] + [
+            (device_id, mons) for device_id, mons in peer_monitors.items()
+            if device_id in offsets]
+        right = 0
+        for device_id, device_monitors in placed:
+            offset_x = offsets.get(device_id, (0, 0))[0]
+            origin_x = min((m.x for m in device_monitors), default=0)
+            right = max(right, max((offset_x + m.x - origin_x + m.w
+                                    for m in device_monitors), default=right))
+        return right or 1920, 0
 
     def _build_layout(self) -> Optional[Layout]:
-        peers = [p for p in self._peers.values() if p.monitors]
-        if not peers:
+        peer_monitors = {device_id: self._known_monitors.get(device_id, [])
+                         for device_id in self.cfg.peers}
+        peer_monitors.update({p.device_id: p.monitors for p in self._peers.values()
+                              if p.monitors})
+        if not any(peer_monitors.values()):
             return None
-        mons = self.monitors + [m for p in peers for m in p.monitors]
+        mons = self.monitors + [m for known in peer_monitors.values() for m in known]
         offsets = {self.cfg.device_id: self.cfg.offsets.get(self.cfg.device_id, (0, 0))}
-        offsets.update({p.device_id: self.cfg.offsets.get(p.device_id,
-                        self._default_offset()) for p in peers})
+        # Saved arrangements first, so every default lands to the right of
+        # everything that already has a place, including offline peers.
+        for device_id in peer_monitors:
+            if device_id in self.cfg.offsets:
+                offsets[device_id] = self.cfg.offsets[device_id]
+        for device_id in peer_monitors:
+            if device_id not in offsets:
+                offsets[device_id] = self._default_offset(peer_monitors, offsets)
         return Layout(mons, offsets)
 
     def _layout_view(self, layout: Optional[Layout]) -> dict:
-        def block(identity: str, name: str, mons: list) -> dict:
-            off = self.cfg.offsets.get(identity, (0, 0))
+        def block(identity: str, name: str, mons: list, connected: bool) -> dict:
+            off = (layout.offsets.get(identity, (0, 0)) if layout else
+                   self.cfg.offsets.get(identity, (0, 0)))
             return {"device_id": identity, "name": name, "offset": list(off),
+                "connected": connected, "draggable": bool(mons),
                 "monitors": [{"id": m.id, "w": m.w, "h": m.h,
                     "primary": m.primary,
                     "x": layout.plane_rect(identity, m.id)[0] if layout else off[0] + m.x,
                     "y": layout.plane_rect(identity, m.id)[1] if layout else off[1] + m.y}
                     for m in mons]}
-        devices = [block(self.cfg.device_id, self.cfg.name, self.monitors)]
-        devices += [block(p.device_id, p.name or "Peer", p.monitors)
-                    for p in self._peers.values() if p.monitors]
+        devices = [block(self.cfg.device_id, self.cfg.name, self.monitors, True)]
+        for device_id, saved in self.cfg.peers.items():
+            peer = self._peers.get(device_id)
+            known = peer.monitors if peer and peer.monitors else self._known_monitors.get(
+                device_id, [])
+            devices.append(block(device_id, peer.name if peer and peer.name else
+                                 saved.name or "Peer", known,
+                                 bool(peer and peer.phase == "session")))
         return {"devices": devices}
 
     def _host_remote_changed(self, remote: bool) -> None:
@@ -915,7 +953,9 @@ class App:
             if owns_session and peer.role == "host" and self._host:
                 self._host.on_peer_lost(peer.device_id)
                 if self._peers:
-                    self._host.layout = self._build_layout()
+                    layout = self._build_layout()
+                    if layout is not None:
+                        self._host.update_layout(layout)
             elif owns_session and peer.role == "client" and self._client_session:
                 self._client_session.on_disconnect(reason)
             peer.outbox = None

@@ -84,11 +84,14 @@ class Layout:
         return x, y, m.w, m.h
 
     def _plane_rects(self, device_id: str, offset: Optional[Tuple[int, int]] = None) -> List[Rect]:
+        mons = self._monitors_of(device_id)
+        if not mons:
+            return []
         ox, oy = self.offsets[device_id] if offset is None else offset
-        mx, my = self._origin(device_id)
+        mx, my = min(m.x for m in mons), min(m.y for m in mons)
         return [
             (ox + (m.x - mx), oy + (m.y - my), m.w, m.h)
-            for m in self._monitors_of(device_id)
+            for m in mons
         ]
 
     # -- crossing ------------------------------------------------------------
@@ -154,11 +157,29 @@ class Layout:
         y = min(r[1] for r in rects)
         return x, y, max(r[0] + r[2] for r in rects) - x, max(r[1] + r[3] for r in rects) - y
 
-    def snap_device(self, mobile: str, anchor: str) -> None:
-        """Move `mobile` flush against the nearest edge of `anchor`,
-        closing whichever gap or overlap is smallest."""
-        ax, ay, aw, ah = self._extent(anchor)
+    def snap_device(self, mobile: str, anchor: Optional[str] = None) -> None:
+        """Move `mobile` flush against the nearest edge of another device,
+        closing whichever gap or overlap is smallest.
+
+        Supplying `anchor` preserves the two-device operation; omitting it
+        considers every other device in the layout.
+        """
+        mobile_rects = self._plane_rects(mobile)
+        if not mobile_rects:
+            return
+        anchors = [anchor] if anchor is not None else [
+            device_id for device_id in self.device_ids() if device_id != mobile]
+        if not anchors:
+            return
         mx, my, mw, mh = self._extent(mobile)
+
+        def nearest(device_id: str) -> int:
+            ax, ay, aw, ah = self._extent(device_id)
+            return min(abs(mx - (ax + aw)), abs((mx + mw) - ax),
+                       abs(my - (ay + ah)), abs((my + mh) - ay))
+
+        anchor = min(anchors, key=lambda device_id: (nearest(device_id), device_id))
+        ax, ay, aw, ah = self._extent(anchor)
         gaps = {
             "right": abs(mx - (ax + aw)),
             "left": abs((mx + mw) - ax),

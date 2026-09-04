@@ -26,6 +26,7 @@ def no_real_input(monkeypatch):
         def __init__(self, *a, **k):
             self.released = 0
             self.held = set()
+            self.moves = []
 
         @classmethod
         def create(cls):
@@ -34,6 +35,9 @@ def no_real_input(monkeypatch):
         def release_all(self):
             self.released += 1
             self.held.clear()
+
+        def move_to(self, x, y):
+            self.moves.append((x, y))
 
         def key(self, kind, value, pressed):
             item = (kind, value)
@@ -664,6 +668,66 @@ def test_the_layout_shows_both_machines_after_pairing(pair):
     )
 
 
+def test_default_offset_places_a_third_device_right_of_the_current_layout(tmp_path):
+    instance = make_app(tmp_path, "Host", 0)
+    first = _Peer("first", "One", object(), phase="session", role="host",
+                  monitors=[Monitor("first", "0", 0, 0, 800, 600)])
+    instance._peers[first.device_id] = first
+    instance.cfg.offsets[instance.cfg.device_id] = (0, 0)
+    instance.cfg.offsets[first.device_id] = (1920, 0)
+    assert instance._default_offset() == (2720, 0)
+
+
+def test_build_layout_assigns_unsaved_peer_offsets_sequentially(tmp_path):
+    instance = make_app(tmp_path, "Host", 0)
+    instance.monitors = [Monitor(instance.cfg.device_id, "0", 0, 0, 100, 100)]
+    for device_id in ("first", "second"):
+        instance.cfg.peers[device_id] = config.Peer(device_id.title(), "token")
+        instance._known_monitors[device_id] = [
+            Monitor(device_id, "0", 0, 0, 100, 100)]
+
+    layout = instance._build_layout()
+
+    assert layout.offsets == {
+        instance.cfg.device_id: (0, 0), "first": (100, 0), "second": (200, 0)}
+    assert layout.map_exit(instance.cfg.device_id, 100, 50) == ("first", 0, 50)
+    assert layout.map_exit("first", 100, 50) == ("second", 0, 50)
+
+
+def test_geometryless_offline_peer_is_not_draggable(tmp_path):
+    instance = make_app(tmp_path, "Host", 0)
+    instance.cfg.peers["ghost"] = config.Peer("Ghost", "token")
+    ghost = instance._layout_view(instance._build_layout())["devices"][1]
+    assert ghost["monitors"] == []
+    assert ghost["draggable"] is False
+    instance.set_offset("ghost", 20, 30)
+
+
+def test_forget_prunes_cached_monitor_geometry(tmp_path):
+    instance = make_app(tmp_path, "Host", 0)
+    instance.cfg.peers["old"] = config.Peer("Old", "token")
+    instance._known_monitors["old"] = [Monitor("old", "0", 0, 0, 100, 100)]
+    instance.forget("old")
+    assert "old" not in instance._known_monitors
+
+
+def test_layout_view_keeps_disconnected_paired_devices_and_marks_connections(tmp_path):
+    instance = make_app(tmp_path, "Host", 0)
+    instance.cfg.peers["offline"] = config.Peer("Offline", "token")
+    instance.cfg.offsets["offline"] = (1920, 0)
+    instance._known_monitors["offline"] = [
+        Monitor("offline", "0", 0, 0, 1280, 720, primary=True)]
+    online = _Peer("online", "Online", object(), phase="session", role="host",
+                   monitors=[Monitor("online", "0", 0, 0, 1000, 800)])
+    instance._peers["online"] = online
+    instance.cfg.peers["online"] = config.Peer("Online", "token")
+    instance.cfg.offsets["online"] = (3200, 0)
+    view = instance._layout_view(instance._build_layout())
+    assert [d["device_id"] for d in view["devices"]] == [
+        instance.cfg.device_id, "offline", "online"]
+    assert [d["connected"] for d in view["devices"]] == [True, False, True]
+
+
 def test_a_disconnect_clears_the_session_on_both_sides(pair):
     connector, target = pair
     connector.connect_manually("127.0.0.1", target._server.port)
@@ -819,3 +883,27 @@ def test_being_connected_to_does_not_erase_the_address_we_had(
 
     assert instance.cfg.peers["mac"].last_address == "192.168.1.50"
     assert instance.cfg.peers["mac"].last_port == 39471
+
+
+def test_default_offsets_use_only_placed_devices(tmp_path):
+    """A wide undragged peer must not push an earlier peer out of reach, and
+    a peer with a saved offset must be counted even when it is offline."""
+    instance = make_app(tmp_path, "Host", 0)
+    instance.monitors = [Monitor(instance.cfg.device_id, "0", 0, 0, 100, 100)]
+    for device_id, width in (("first", 100), ("second", 3000)):
+        instance.cfg.peers[device_id] = config.Peer(device_id.title(), "token")
+        instance._known_monitors[device_id] = [
+            Monitor(device_id, "0", 0, 0, width, 100)]
+
+    layout = instance._build_layout()
+    assert layout.offsets["first"] == (100, 0)
+    assert layout.offsets["second"] == (200, 0)
+    assert layout.map_exit(instance.cfg.device_id, 100, 50) == ("first", 0, 50)
+
+    # An offline peer with a saved offset occupies its place; the undragged
+    # one goes to the right of it instead of on top of it.
+    instance.cfg.offsets["second"] = (100, 0)
+    layout = instance._build_layout()
+    assert layout.offsets["second"] == (100, 0)
+    assert layout.offsets["first"] == (3100, 0)
+    assert layout.can_place("first", layout.offsets["first"])

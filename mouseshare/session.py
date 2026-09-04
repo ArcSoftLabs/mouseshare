@@ -70,7 +70,11 @@ class HostSession:
     # -- capture callbacks ---------------------------------------------------
 
     def on_move(self, x: int, y: int) -> None:
-        """Not remote: watch for the cursor pressing against a shared edge."""
+        """Not remote: watch for the cursor pressing against a shared edge.
+
+        At a corner both axes are on an edge. Probe horizontally first, so
+        a horizontal neighbour wins over a vertical neighbour every time.
+        """
         if not getattr(self, "_saw_a_move", False):
             self._saw_a_move = True
             log.debug("capture is delivering moves, first at (%d,%d)", x, y)
@@ -78,14 +82,15 @@ class HostSession:
             return
         # The OS clamps the cursor inside the screen, so a cursor "leaving"
         # only ever sits *on* the edge. Probe one pixel past it.
-        probe = self._probe(x, y)
-        if probe is None:
+        hit = None
+        for probe in self._probes(x, y):
+            hit = self.layout.map_exit(self.local_id, *probe)
+            log.debug("edge at (%d,%d) probe=%s hit=%s", x, y, probe, hit)
+            if hit is not None and hit[0] in self.peers:
+                break
+        if hit is None or hit[0] not in self.peers:
             return
-        hit = self.layout.map_exit(self.local_id, *probe)
-        log.debug("edge at (%d,%d) probe=%s hit=%s", x, y, probe, hit)
-        if hit is None or hit[0] != self.peer_id:
-            return
-        _, px, py = hit
+        self.peer_id, px, py = hit
         px, py = self.layout.clamp(self.peer_id, px, py)
         self.remote = True
         self._on_remote_change(True)
@@ -132,19 +137,27 @@ class HostSession:
                 )
         return (x, y)
 
-    def _probe(self, x: int, y: int) -> Optional[tuple]:
+    def _probes(self, x: int, y: int) -> list[tuple[int, int]]:
         for m in self.layout.monitors:
             if m.device_id != self.local_id:
                 continue
             if not (m.x <= x < m.x + m.w and m.y <= y < m.y + m.h):
                 continue
-            px = x + (1 if x >= m.x + m.w - 1 else -1 if x <= m.x else 0)
-            py = y + (1 if y >= m.y + m.h - 1 else -1 if y <= m.y else 0)
-            return None if (px, py) == (x, y) else (px, py)
-        return None
+            horizontal = 1 if x >= m.x + m.w - 1 else -1 if x <= m.x else 0
+            vertical = 1 if y >= m.y + m.h - 1 else -1 if y <= m.y else 0
+            probes = []
+            if horizontal:
+                probes.append((x + horizontal, y))
+            if vertical:
+                probes.append((x, y + vertical))
+            return probes
+        return []
 
     def on_delta(self, dx: int, dy: int) -> None:
-        """Remote: move the tracked peer cursor, and watch for the return."""
+        """Remote: move the tracked peer cursor, and watch for the return.
+
+        A button held during a peer hop is released there and not replayed.
+        """
         if not self.remote:
             return
         self._log_movement(dx, dy)
@@ -156,6 +169,15 @@ class HostSession:
             log.info("cursor returned to %s at (%d, %d)", self.local_id, hx, hy)
             self._release((hx, hy))
             self._forward(protocol.leave())
+            return
+        if hit is not None and hit[0] in self.peers:
+            target, px, py = hit
+            self._forward(protocol.leave())
+            self.peer_id = target
+            self._peer_pos = self.layout.clamp(target, px, py)
+            self._on_remote_change(True)
+            log.info("cursor crossed to %s at (%d, %d)", target, *self._peer_pos)
+            self._forward(protocol.enter(*self._peer_pos))
             return
         self._peer_pos = self.layout.clamp(self.peer_id, nx, ny)
         self._forward(protocol.pos(*self._peer_pos))
@@ -231,6 +253,19 @@ class HostSession:
         self.peers[device_id] = peer_monitors
         if not self.peer_id:
             self.peer_id = device_id
+
+    def update_layout(self, layout: Layout) -> None:
+        """Replace live geometry without leaving a cursor on stale screens."""
+        self.layout = layout
+        if not self.remote:
+            return
+        if not layout._monitors_of(self.peer_id):
+            self._release()
+            return
+        clamped = layout.clamp(self.peer_id, *self._peer_pos)
+        if clamped != self._peer_pos:
+            self._peer_pos = clamped
+            self._forward(protocol.pos(*self._peer_pos))
 
     def remove_peer(self, device_id: str) -> None:
         self.peers.pop(device_id, None)

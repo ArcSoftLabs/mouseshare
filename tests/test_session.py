@@ -57,12 +57,14 @@ class FakeInjector:
 class FakeSender:
     def __init__(self):
         self.sent = []
+        self.destinations = []
         self.broken = False
 
     def __call__(self, peer_id, msg):
         if self.broken:
             raise OSError("peer went away")
         self.sent.append(msg)
+        self.destinations.append(peer_id)
 
 
 def a_host():
@@ -192,6 +194,116 @@ def test_the_cursor_is_clamped_onto_the_peer_screen():
     host.on_move(1919, 500)
     host.on_delta(0, 10_000)
     assert send.sent[-1] == {"t": "pos", "x": 0, "y": 1116}
+
+
+def multi_layout() -> Layout:
+    return Layout(
+        monitors=[
+            Monitor(PC, "0", 0, 0, 100, 100, primary=True),
+            Monitor("left", "0", 0, 0, 100, 100, primary=True),
+            Monitor("right", "0", 0, 0, 100, 100, primary=True),
+            Monitor("top", "0", 0, 0, 100, 100, primary=True),
+            Monitor("bottom", "0", 0, 0, 100, 100, primary=True),
+        ],
+        offsets={PC: (0, 0), "left": (-100, 0), "right": (100, 0),
+                 "top": (0, -100), "bottom": (0, 100)},
+    )
+
+
+def a_multi_host():
+    capture, injector, send = FakeCapture(), FakeInjector(), FakeSender()
+    host = HostSession(multi_layout(), PC, capture, injector, send,
+        peers={peer: [] for peer in ("left", "right", "top", "bottom")})
+    return host, capture, injector, send
+
+
+@pytest.mark.parametrize(("point", "peer", "entered"), [
+    ((50, 0), "top", (50, 99)),
+    ((50, 99), "bottom", (50, 0)),
+])
+def test_top_and_bottom_edges_route_to_their_neighbours(point, peer, entered):
+    host, _, _, send = a_multi_host()
+    host.on_move(*point)
+    assert host.peer_id == peer
+    assert send.destinations[-1] == peer
+    assert send.sent[-1] == {"t": "enter", "x": entered[0], "y": entered[1]}
+
+
+def test_a_corner_crossing_prefers_the_horizontal_neighbour():
+    host, _, _, send = a_multi_host()
+    host.on_move(99, 99)
+    assert host.peer_id == "right"
+    assert send.destinations[-1] == "right"
+
+
+def test_a_corner_falls_back_to_the_vertical_neighbour():
+    layout = Layout([
+        Monitor(PC, "0", 0, 0, 100, 100, primary=True),
+        Monitor("bottom", "0", 0, 0, 100, 100, primary=True),
+    ], {PC: (0, 0), "bottom": (0, 100)})
+    capture, injector, send = FakeCapture(), FakeInjector(), FakeSender()
+    host = HostSession(layout, PC, capture, injector, send,
+                       peers={"bottom": []})
+    host.on_move(99, 99)
+    assert host.peer_id == "bottom"
+    assert send.sent[-1] == {"t": "enter", "x": 99, "y": 0}
+
+
+def test_remote_cursor_can_hop_directly_between_peers():
+    layout = multi_layout()
+    layout.set_offset("bottom", (100, 100))
+    capture, injector, send = FakeCapture(), FakeInjector(), FakeSender()
+    host = HostSession(layout, PC, capture, injector, send,
+        peers={peer: [] for peer in ("right", "bottom")})
+    host.on_move(99, 50)
+    host.on_delta(0, 50)
+    assert host.remote is True
+    assert host.peer_id == "bottom"
+    assert send.destinations[-2:] == ["right", "bottom"]
+    assert kinds(send)[-2:] == ["leave", "enter"]
+
+
+def test_input_is_forwarded_only_to_the_active_peer_after_a_hop():
+    host, _, _, send = a_multi_host()
+    host.on_move(99, 50)
+    host.on_click("left", True)
+    host.on_scroll(0, -1)
+    host.on_key("char", "a", True)
+    assert send.destinations[-3:] == ["right", "right", "right"]
+
+
+def test_replacing_a_stale_layout_reclamps_the_active_position():
+    host, _, _, send = a_multi_host()
+    host.on_move(99, 50)
+    changed = Layout([
+        Monitor(PC, "0", 0, 0, 100, 100, primary=True),
+        Monitor("right", "0", 0, 0, 40, 40, primary=True),
+    ], {PC: (0, 0), "right": (100, 0)})
+    host.update_layout(changed)
+    assert host.remote is True
+    assert send.sent[-1] == {"t": "pos", "x": 0, "y": 39}
+
+
+def test_replacing_a_layout_without_the_active_peer_warps_home():
+    host, capture, injector, _ = a_multi_host()
+    host.on_move(99, 50)
+    host.update_layout(Layout(
+        [Monitor(PC, "0", 0, 0, 100, 100, primary=True)], {PC: (0, 0)}))
+    assert host.remote is False
+    assert capture.suppressing is False
+    assert injector.calls[-1] == ("move", 50, 50)
+
+
+def test_losing_an_inactive_peer_does_not_disturb_the_active_peer():
+    host, capture, injector, send = a_multi_host()
+    host.on_move(99, 50)
+    before = list(send.sent)
+    host.on_peer_lost("left")
+    assert host.remote is True
+    assert host.peer_id == "right"
+    assert capture.suppressing is True
+    assert injector.calls == []
+    assert send.sent == before
 
 
 # -- safety ------------------------------------------------------------------

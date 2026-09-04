@@ -83,6 +83,16 @@ def test_crossing_back_from_the_mac_lands_on_the_pcs_right_hand_monitor():
     assert layout.map_exit(MAC, -1, 500) == (PC, 3839, 500)
 
 
+def test_stale_overlapping_targets_are_chosen_by_device_then_monitor_id():
+    layout = Layout([
+        Monitor(PC, "0", 0, 0, 100, 100),
+        Monitor("z-device", "0", 0, 0, 100, 100),
+        Monitor("a-device", "z-monitor", 0, 0, 100, 100),
+        Monitor("a-device", "a-monitor", 0, 0, 100, 100),
+    ], {PC: (0, 0), "z-device": (100, 0), "a-device": (100, 0)})
+    assert layout.map_exit(PC, 100, 50) == ("a-device", 0, 50)
+
+
 # -- clamping ----------------------------------------------------------------
 
 
@@ -142,3 +152,22 @@ def test_snap_picks_the_nearest_edge():
     layout.set_offset(MAC, (0, 1000))  # below the PC, roughly aligned
     layout.snap_device(MAC, PC)
     assert layout.plane_rect(MAC, "0")[:2] == (0, 1080)
+
+
+def test_snap_without_an_anchor_uses_the_nearest_of_all_other_devices():
+    layout = Layout([
+        Monitor(PC, "0", 0, 0, 100, 100),
+        Monitor(MAC, "0", 0, 0, 100, 100),
+        Monitor("third", "0", 0, 0, 100, 100),
+    ], {PC: (0, 0), MAC: (100, 0), "third": (205, 20)})
+    layout.snap_device("third")
+    assert layout.offsets["third"] == (200, 20)
+
+
+def test_snap_ignores_a_device_without_monitor_geometry():
+    layout = Layout(
+        [Monitor(PC, "0", 0, 0, 100, 100)],
+        {PC: (0, 0), "ghost": (150, 0)},
+    )
+    layout.snap_device("ghost")
+    assert layout.offsets["ghost"] == (150, 0)
