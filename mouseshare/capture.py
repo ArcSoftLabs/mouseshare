@@ -498,7 +498,11 @@ class InputCapture:
             dy = Quartz.CGEventGetIntegerValueField(
                 event, Quartz.kCGMouseEventDeltaY
             )
-            if (dx, dy) != (0, 0):
+            if (dx, dy) != (0, 0) and max(abs(dx), abs(dy)) <= self._limit:
+                # A larger single-event delta is the park warp settling, not
+                # the hand: the first event after CGWarpMouseCursorPosition
+                # carries the warp displacement (half the screen) in its
+                # delta fields. Drop it, as `_moved` drops the same on Windows.
                 self._on_delta(dx, dy)
         return None  # swallow the real event
 

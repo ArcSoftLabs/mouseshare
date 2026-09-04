@@ -74,6 +74,10 @@ def make_capture(monkeypatch):
         on_key=lambda *_: None,
     )
     capture._controller = RecordingController()
+    # start_remote sets this from the parked screen's quarter-size; the tests
+    # that flip `suppressing` by hand must model the same live remote-mode
+    # limit, because the intercept now drops deltas larger than it.
+    capture._limit = 360
     capture._start_mouse(types.SimpleNamespace(Listener=DarwinListener))
     return capture, capture._mouse_listener, quartz, calls, events
 
@@ -100,6 +104,20 @@ def test_suppressed_moves_use_event_deltas_not_drifting_locations(monkeypatch):
     # Requirement 3: the drifting positions never reach _moved, whose
     # beyond-limit branch would warp the controller back to the anchor.
     assert capture._controller.warps == []
+
+
+def test_the_warp_settling_delta_after_a_crossing_is_dropped(monkeypatch):
+    # The first event after start_remote's CGWarpMouseCursorPosition carries
+    # the warp displacement (about half the screen) in its delta fields. That
+    # delta exceeds the remote-mode limit and must not cross the peer back.
+    capture, listener, quartz, _, events = make_capture(monkeypatch)
+    capture.suppressing = True
+    callbacks = listener.kwargs
+    artifact = event(quartz, 1277, 5)
+    assert callbacks["darwin_intercept"](quartz.kCGEventMouseMoved, artifact) is None
+    real = event(quartz, 2, 1)
+    assert callbacks["darwin_intercept"](quartz.kCGEventMouseMoved, real) is None
+    assert events == [("delta", 2, 1)]
 
 
 def test_suppressed_dragged_events_report_deltas(monkeypatch):
