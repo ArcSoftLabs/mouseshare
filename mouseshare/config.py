@@ -43,6 +43,7 @@ class Config:
     peers: Dict[str, Peer] = field(default_factory=dict)
     offsets: Dict[str, Tuple[int, int]] = field(default_factory=dict)
     escape_key: str = field(default_factory=default_escape_key)
+    share_clipboard: bool = True
 
 
 def _defaults() -> Config:
@@ -67,6 +68,7 @@ def load(path: Path = DEFAULT_PATH) -> Config:
     escape_key = raw.get("escape_key", cfg.escape_key)
     if escape_key in ESCAPE_KEYS:
         cfg.escape_key = escape_key
+    cfg.share_clipboard = raw.get("share_clipboard", True) is not False
     for device_id, peer in (raw.get("peers") or {}).items():
         cfg.peers[device_id] = Peer(
             name=peer.get("name", ""),
@@ -105,6 +107,7 @@ def save(cfg: Config, path: Path = DEFAULT_PATH) -> None:
         "name": cfg.name,
         "port": cfg.port,
         "escape_key": cfg.escape_key,
+        "share_clipboard": cfg.share_clipboard,
         "peers": {
             device_id: {
                 "name": p.name,

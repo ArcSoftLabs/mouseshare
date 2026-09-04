@@ -17,7 +17,7 @@ VERSION = 3
 MIN_VERSION = 2
 MAX_LINE = 64 * 1024
 CAPABILITIES = ["heartbeat"]
-OPTIONAL_TYPES = {"ping", "pong", "edge"}
+OPTIONAL_TYPES = {"ping", "pong", "edge", "clip", "clip_chunk"}
 
 
 class ProtocolError(Exception):

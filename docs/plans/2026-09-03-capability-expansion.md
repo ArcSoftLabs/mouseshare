@@ -327,3 +327,5 @@ GUI launch via `open`); Windows runs via `py.exe`; Linux via WSLg.
 - [x] M4 — N-device layout placement and editor rendering. The live-device ring also
   appears in the two-device view, trading exact legacy rendering for consistent status.
 - [x] M5 — four-device loopback routing and recovery coverage.
+- [x] C1 — platform clipboard backends and availability factory.
+- [x] C2 — capability-gated clipboard synchronisation and relay.

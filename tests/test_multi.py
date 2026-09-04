@@ -71,6 +71,65 @@ def test_three_clients_disconnect_and_reconnect_without_disturbing_others(star):
     assert host._host.peer_id == one.cfg.device_id
 
 
+def test_client_clipboard_is_relayed_to_the_other_two_clients(tmp_path, monkeypatch):
+    from .test_clipboard import FakeClipboard
+
+    backends = []
+
+    def create_backend():
+        backend = FakeClipboard("")
+        backends.append(backend)
+        return backend
+
+    monkeypatch.setattr(app_module.Clipboard, "create", create_backend)
+    apps = [make_app(tmp_path, name) for name in ("host", "one", "two", "three")]
+    host, one, two, three = apps
+    for instance in apps:
+        instance._clipboard.device_name = instance.cfg.name
+    try:
+        for client in (one, two, three):
+            pair(host, client)
+        backends[1].set_text("sensitive-payload")
+        one._clipboard.poll_once()
+        assert wait_for(lambda: backends[0].read_text() == "sensitive-payload")
+        assert wait_for(lambda: backends[2].read_text() == "sensitive-payload")
+        assert wait_for(lambda: backends[3].read_text() == "sensitive-payload")
+        assert "sensitive-payload" not in repr(two.state.snapshot())
+        assert two.state.snapshot()["notice"] == "Clipboard from one"
+    finally:
+        for instance in apps:
+            instance.stop()
+
+
+def test_non_ascii_clipboard_near_inline_limit_stays_connected(
+        tmp_path, monkeypatch):
+    from .test_clipboard import FakeClipboard
+
+    backends = []
+
+    def create_backend():
+        backend = FakeClipboard("")
+        backends.append(backend)
+        return backend
+
+    monkeypatch.setattr(app_module.Clipboard, "create", create_backend)
+    apps = [make_app(tmp_path, name) for name in ("left", "right")]
+    left, right = apps
+    try:
+        pair(left, right)
+        text = "世" * 10922
+        backends[0].set_text(text)
+        left._clipboard.poll_once()
+
+        assert wait_for(lambda: backends[1].read_text() == text)
+        assert right.cfg.device_id in left._peers
+        assert left.cfg.device_id in right._peers
+        assert "Connection dropped" not in left.state.snapshot()["error"]
+        assert "Connection dropped" not in right.state.snapshot()["error"]
+    finally:
+        for instance in apps:
+            instance.stop()
+
 def test_client_cannot_connect_and_host_refuses_inbound_as_busy(star):
     host, one, _, three = star
     pair(host, one)

@@ -35,6 +35,7 @@ def test_peers_round_trip_with_their_tokens_and_offsets(tmp_path):
     )
     cfg.offsets["deadbeef"] = (1920, 0)
     cfg.escape_key = "alt"
+    cfg.share_clipboard = False
     config.save(cfg, path)
 
     loaded = config.load(path)
@@ -43,6 +44,11 @@ def test_peers_round_trip_with_their_tokens_and_offsets(tmp_path):
     assert loaded.peers["deadbeef"].last_address == "192.168.1.20"
     assert loaded.offsets["deadbeef"] == (1920, 0)
     assert loaded.escape_key == "alt"
+    assert loaded.share_clipboard is False
+
+
+def test_clipboard_sharing_defaults_on(tmp_path):
+    assert config.load(tmp_path / "config.json").share_clipboard is True
 
 
 def test_a_corrupt_config_is_replaced_rather_than_crashing_the_app(tmp_path):

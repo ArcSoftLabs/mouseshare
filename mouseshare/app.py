@@ -16,6 +16,7 @@ from typing import Any, Optional
 
 from . import config, discovery, monitors, pairing, protocol, session
 from .capture import InputCapture
+from .clipboard import Clipboard, ClipboardSync
 from .inject import Injector
 from .layout import Layout
 from .network import MessageClient, MessageServer
@@ -67,7 +68,7 @@ class App:
         "offered": {"pair_challenge", "pair_err"},
         "proved": {"pair_ok", "pair_err"},
         "session": {"layout", "enter", "pos", "click", "scroll", "key",
-                    "leave", "ping", "pong", "edge"},
+                    "leave", "ping", "pong", "edge", "clip", "clip_chunk"},
     }
 
     def __init__(self, deliver, cfg_path=config.DEFAULT_PATH) -> None:
@@ -91,6 +92,15 @@ class App:
         self._host: Optional[HostSession] = None
         self._client_session: Optional[ClientSession] = None
         self._capture: Optional[InputCapture] = None
+        self._clipboard_backend = Clipboard.create()
+        self._clipboard: Optional[ClipboardSync] = None
+        self._clipboard_notice_token = 0
+        if self._clipboard_backend is not None:
+            self._clipboard = ClipboardSync(
+                self._clipboard_backend, self.cfg.device_id, self.cfg.name,
+                self._publish_clipboard, self._clipboard_notice,
+                self._clipboard_active)
+            self._clipboard.set_enabled(self.cfg.share_clipboard)
         # Temporary; see _injection_cost.
         self._inj_since = time.monotonic()
         self._inj_n = self._inj_pos = 0
@@ -104,7 +114,8 @@ class App:
             "layout": self._layout_view(None), "error": "",
             # Something worth saying that is not something going wrong.
             "notice": "",
-            "settings": {"escape_key": self.cfg.escape_key},
+            "settings": {"escape_key": self.cfg.escape_key,
+                         "share_clipboard": self.cfg.share_clipboard},
         })
 
     # -- lifecycle -----------------------------------------------------------
@@ -149,6 +160,8 @@ class App:
             peers = list(self._handshakes) + list(self._peers.values())
         for peer in peers:
             self._teardown_peer(peer, "shutdown", False)
+        if self._clipboard:
+            self._clipboard.stop()
         self._release_input()
         for part in (self._server, self._browser, self._advertiser):
             try:
@@ -264,6 +277,8 @@ class App:
 
     def rename(self, name: str) -> dict:
         self.cfg.name = name.strip() or self.cfg.name
+        if self._clipboard:
+            self._clipboard.device_name = self.cfg.name
         config.save(self.cfg, self._cfg_path)
         self.state.set(device={"id": self.cfg.device_id, "name": self.cfg.name,
                                "port": self.cfg.port})
@@ -276,8 +291,20 @@ class App:
         config.save(self.cfg, self._cfg_path)
         if self._capture:
             self._capture.set_escape_key(value)
-        self.state.set(settings={"escape_key": value})
+        self.state.set(settings={"escape_key": value,
+            "share_clipboard": self.cfg.share_clipboard})
         self._publish_session()
+        return self.state.snapshot()
+
+    def set_share_clipboard(self, enabled: bool) -> dict:
+        self.cfg.share_clipboard = bool(enabled)
+        config.save(self.cfg, self._cfg_path)
+        if self._clipboard:
+            self._clipboard.set_enabled(self.cfg.share_clipboard)
+        self.state.set(settings={"escape_key": self.cfg.escape_key,
+            "share_clipboard": self.cfg.share_clipboard})
+        self._broadcast(protocol.layout(monitors.to_wire(self.monitors),
+                                        caps=self._capabilities()))
         return self.state.snapshot()
 
     def forget(self, peer_id: str) -> dict:
@@ -494,6 +521,8 @@ class App:
             self._publish_session()
         elif kind == "ping" and "heartbeat" in peer.caps:
             self._queue(peer, protocol.pong(msg["seq"]))
+        elif kind in {"clip", "clip_chunk"}:
+            self._on_clipboard(peer, msg)
         elif kind not in {"pong", "edge"} and self._client_session:
             self._inject(msg)
 
@@ -603,7 +632,8 @@ class App:
         config.save(self.cfg, self._cfg_path)
         peer.pending = None
         self._send_peer(peer, protocol.pair_ok(self.cfg.name,
-            monitors.to_wire(self.monitors), token, hmac=pairing.ok_proof(
+            monitors.to_wire(self.monitors), token, caps=self._capabilities(),
+            hmac=pairing.ok_proof(
                 secret, peer.nonce, self.cfg.device_id, peer.device_id)))
         self._become_client(peer)
 
@@ -622,7 +652,8 @@ class App:
                               identity, self.cfg.device_id):
             return self._refuse(peer, "authentication failed")
         self._send_peer(peer, protocol.pair_ok(self.cfg.name,
-            monitors.to_wire(self.monitors), hmac=pairing.ok_proof(
+            monitors.to_wire(self.monitors), caps=self._capabilities(),
+            hmac=pairing.ok_proof(
                 secret, peer.nonce, self.cfg.device_id, identity)))
         self._become_client(peer)
 
@@ -709,7 +740,8 @@ class App:
         else:
             self._host.add_peer(peer.device_id, peer.monitors)
             self._host.update_layout(layout)
-        peer.outbox.put(protocol.layout(monitors.to_wire(self.monitors)))
+        peer.outbox.put(protocol.layout(monitors.to_wire(self.monitors),
+                                        caps=self._capabilities()))
         self._start_heartbeat(peer)
         self._publish_session("", "layout")
 
@@ -729,6 +761,52 @@ class App:
         caps = msg.get("caps", [])
         peer.caps = frozenset(x for x in caps if isinstance(x, str)) \
             if isinstance(caps, list) else frozenset()
+
+    def _capabilities(self) -> list[str]:
+        caps = list(protocol.CAPABILITIES)
+        if self.cfg.share_clipboard and self._clipboard is not None:
+            caps.append("clipboard")
+        return caps
+
+    def _clipboard_active(self) -> bool:
+        with self._lock:
+            return any(p.phase == "session" and "clipboard" in p.caps
+                       for p in self._peers.values())
+
+    def _publish_clipboard(self, msg: dict, skip: str | None = None) -> None:
+        with self._lock:
+            peer_ids = [p.device_id for p in self._peers.values()
+                        if p.phase == "session" and "clipboard" in p.caps
+                        and p.device_id != skip]
+        for peer_id in peer_ids:
+            self._send(peer_id, msg)
+
+    def _clipboard_notice(self, notice: str) -> None:
+        with self._lock:
+            self._clipboard_notice_token += 1
+            token = self._clipboard_notice_token
+        self.state.set(notice=notice)
+        timer = threading.Timer(3, self._clear_clipboard_notice, args=(token,))
+        timer.daemon = True
+        timer.start()
+
+    def _clear_clipboard_notice(self, token: int) -> None:
+        with self._lock:
+            if token != self._clipboard_notice_token:
+                return
+        self.state.set(notice="")
+
+    def _on_clipboard(self, peer: _Peer, msg: dict) -> None:
+        if (not self.cfg.share_clipboard or self._clipboard is None
+                or "clipboard" not in peer.caps):
+            return
+        source_id = msg.get("device_id")
+        source_name = msg.get("name") if isinstance(msg.get("name"), str) else ""
+        source_name = source_name or self.cfg.peers.get(
+            source_id, config.Peer(str(source_id), "")).name
+        accepted = self._clipboard.receive(peer.device_id, source_name, msg)
+        if accepted is not None and peer.role == "host":
+            self._publish_clipboard(accepted, peer.device_id)
 
     def _send_peer(self, peer: _Peer, msg: dict) -> None:
         """Send on one peer's link, adapting extensions to its wire version."""
@@ -935,6 +1013,8 @@ class App:
                 self._handshakes.remove(peer)
             if self._inbound_peer is peer:
                 self._inbound_peer = None
+            if self._clipboard:
+                self._clipboard.discard_peer(peer.device_id)
 
         # A reader may already be waiting for the app lock. Stop and join it
         # without owning that lock, then no input can arrive after release.

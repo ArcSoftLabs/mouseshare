@@ -64,6 +64,7 @@ function render(next) {
   if (document.activeElement !== $('#escape-key')) {
     $('#escape-key').value = state.settings.escape_key;
   }
+  $('#share-clipboard').checked = state.settings.share_clipboard;
   if (document.activeElement !== $('#name-input')) {
     $('#name-input').value = state.device.name;
   }
@@ -312,6 +313,8 @@ function wire() {
     api().rename($('#name-input').value).then(render);
   $('#escape-key').onchange = () =>
     api().set_escape_key($('#escape-key').value).then(render);
+  $('#share-clipboard').onchange = () =>
+    api().set_share_clipboard($('#share-clipboard').checked).then(render);
   $('#code-submit').onclick = submitCode;
 
   const boxes = $$('#code-entry input');

@@ -379,6 +379,18 @@ def test_setting_escape_key_applies_to_a_running_capture(tmp_path):
     assert calls == ["shift"]
 
 
+def test_setting_clipboard_off_applies_immediately_and_persists(tmp_path):
+    instance = make_app(tmp_path, "settings", 0)
+    calls = []
+    instance._clipboard = type("Sync", (), {
+        "set_enabled": lambda self, value: calls.append(value),
+    })()
+    snapshot = instance.set_share_clipboard(False)
+    assert calls == [False]
+    assert snapshot["settings"]["share_clipboard"] is False
+    assert config.load(instance._cfg_path).share_clipboard is False
+
+
 def test_remote_state_delivery_leaves_the_capture_callback_thread(tmp_path):
     calling_thread = threading.get_ident()
     delivered_on = []
@@ -456,8 +468,8 @@ def test_the_right_code_pairs_both_machines(pair):
     assert wait_for(lambda: target.state.snapshot().get("session"))
     assert target.state.snapshot()["session"]["role"] == "client"
     assert connector.negotiated_version == 3
-    assert next(iter(connector._peers.values())).caps == {"heartbeat"}
-    assert next(iter(target._peers.values())).caps == {"heartbeat"}
+    assert next(iter(connector._peers.values())).caps == {"heartbeat", "clipboard"}
+    assert next(iter(target._peers.values())).caps == {"heartbeat", "clipboard"}
 
 
 def test_client_sends_edge_to_host_through_its_outbox(pair):
