@@ -9,9 +9,11 @@ snapshots derived from it.
 from __future__ import annotations
 
 import logging
+import os
 import threading
 import time
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any, Optional, Union
 
 from . import config, discovery, monitors, pairing, protocol, session
@@ -23,6 +25,7 @@ from .network import MessageClient, MessageServer
 from .outbox import Outbox
 from .session import ClientSession, HostSession
 from .state import StateOwner
+from .transfer import TransferManager
 
 # How often each peer is told where the cursor is. A mouse reports about a
 # thousand times a second and a screen redraws sixty; everything between
@@ -68,7 +71,9 @@ class App:
         "offered": {"pair_challenge", "pair_err"},
         "proved": {"pair_ok", "pair_err"},
         "session": {"layout", "enter", "pos", "click", "scroll", "key",
-                    "leave", "ping", "pong", "edge", "clip", "clip_chunk"},
+                    "leave", "ping", "pong", "edge", "clip", "clip_chunk",
+                    "xfer_offer", "xfer_accept", "xfer_reject", "xfer_chunk",
+                    "xfer_ack", "xfer_done", "xfer_cancel", "xfer_error"},
     }
 
     def __init__(self, deliver, cfg_path=None) -> None:
@@ -95,6 +100,7 @@ class App:
         self._clipboard_backend = Clipboard.create()
         self._clipboard: Optional[ClipboardSync] = None
         self._clipboard_notice_token = 0
+        self._transfers = TransferManager(self._send, self._publish_transfers)
         if self._clipboard_backend is not None:
             self._clipboard = ClipboardSync(
                 self._clipboard_backend, self.cfg.device_id, self.cfg.name,
@@ -111,11 +117,13 @@ class App:
             "device": {"id": self.cfg.device_id, "name": self.cfg.name,
                        "port": self.cfg.port},
             "peers": [], "pairing": None, "session": None,
+            "transfers": [],
             "layout": self._layout_view(None), "error": "",
             # Something worth saying that is not something going wrong.
             "notice": "",
             "settings": {"escape_key": self.cfg.escape_key,
-                         "share_clipboard": self.cfg.share_clipboard},
+                         "share_clipboard": self.cfg.share_clipboard,
+                         "share_files": self.cfg.share_files},
         })
 
     # -- lifecycle -----------------------------------------------------------
@@ -292,7 +300,8 @@ class App:
         if self._capture:
             self._capture.set_escape_key(value)
         self.state.set(settings={"escape_key": value,
-            "share_clipboard": self.cfg.share_clipboard})
+            "share_clipboard": self.cfg.share_clipboard,
+            "share_files": self.cfg.share_files})
         self._publish_session()
         return self.state.snapshot()
 
@@ -302,10 +311,55 @@ class App:
         if self._clipboard:
             self._clipboard.set_enabled(self.cfg.share_clipboard)
         self.state.set(settings={"escape_key": self.cfg.escape_key,
-            "share_clipboard": self.cfg.share_clipboard})
+            "share_clipboard": self.cfg.share_clipboard,
+            "share_files": self.cfg.share_files})
         self._broadcast(protocol.layout(monitors.to_wire(self.monitors),
                                         caps=self._capabilities()))
         return self.state.snapshot()
+
+    def set_share_files(self, enabled: bool) -> dict:
+        self.cfg.share_files = bool(enabled)
+        if not self.cfg.share_files:
+            self._transfers.cancel_all()
+        config.save(self.cfg, self._cfg_path)
+        self.state.set(settings={"escape_key": self.cfg.escape_key,
+            "share_clipboard": self.cfg.share_clipboard,
+            "share_files": self.cfg.share_files})
+        self._broadcast(protocol.layout(monitors.to_wire(self.monitors),
+                                        caps=self._capabilities()))
+        return self.state.snapshot()
+
+    def send_files(self, device_id: str, paths: list[str]) -> dict:
+        with self._lock:
+            peer = self._peers.get(device_id)
+        if (not self.cfg.share_files or not peer or peer.phase != "session"
+                or "files" not in peer.caps):
+            raise ValueError("That device is not available for file sharing")
+        if not isinstance(paths, list) or not paths:
+            raise ValueError("Choose at least one file")
+        checked = []
+        for raw in paths:
+            if not isinstance(raw, str):
+                raise ValueError("Invalid file path")
+            path = Path(raw)
+            if not path.is_file() or not os.access(path, os.R_OK):
+                raise ValueError(f"Cannot read {path.name}")
+            checked.append(path)
+        self._transfers.offer(device_id, peer.name, checked)
+        return self.state.snapshot()
+
+    def cancel_transfer(self, transfer_id: str) -> dict:
+        self._transfers.cancel(transfer_id)
+        return self.state.snapshot()
+
+    def pick_files(self) -> list[str]:
+        try:
+            import webview
+            result = webview.windows[0].create_file_dialog(webview.OPEN_DIALOG,
+                allow_multiple=True)
+            return list(result or [])
+        except (AttributeError, IndexError, ImportError):
+            return []
 
     def forget(self, peer_id: str) -> dict:
         self.cfg.peers.pop(peer_id, None)
@@ -551,6 +605,11 @@ class App:
             self._queue(peer, protocol.pong(msg["seq"]))
         elif kind in {"clip", "clip_chunk"}:
             self._on_clipboard(peer, msg)
+        elif kind.startswith("xfer_"):
+            if kind == "xfer_offer" and not self.cfg.share_files:
+                self._transfers.receive(peer.device_id, peer.name, msg, False)
+            else:
+                self._transfers.receive(peer.device_id, peer.name, msg)
         elif kind not in {"pong", "edge"} and self._client_session:
             self._inject(msg)
 
@@ -794,7 +853,12 @@ class App:
         caps = list(protocol.CAPABILITIES)
         if self.cfg.share_clipboard and self._clipboard is not None:
             caps.append("clipboard")
+        if self.cfg.share_files:
+            caps.append("files")
         return caps
+
+    def _publish_transfers(self, transfers: list[dict]) -> None:
+        self.state.set(transfers=transfers)
 
     def _clipboard_active(self) -> bool:
         with self._lock:
@@ -1043,6 +1107,10 @@ class App:
                 self._inbound_peer = None
             if self._clipboard:
                 self._clipboard.discard_peer(peer.device_id)
+
+        # Transfer cancellation may wait for a chunk send to leave its own
+        # lock; that send resolves the peer under ``self._lock``.
+        self._transfers.discard_peer(peer.device_id)
 
         # A reader may already be waiting for the app lock. Stop and join it
         # without owning that lock, then no input can arrive after release.

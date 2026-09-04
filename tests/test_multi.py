@@ -130,6 +130,38 @@ def test_non_ascii_clipboard_near_inline_limit_stays_connected(
         for instance in apps:
             instance.stop()
 
+
+def test_files_transfer_both_directions_without_reaching_second_client(tmp_path):
+    host, one, two = (make_app(tmp_path, name) for name in ("host", "one", "two"))
+    host_destination = tmp_path / "host-received"
+    one_destination = tmp_path / "one-received"
+    two_destination = tmp_path / "two-received"
+    host._transfers.destination = host_destination
+    one._transfers.destination = one_destination
+    two._transfers.destination = two_destination
+    client_file = tmp_path / "from-client.txt"
+    host_file = tmp_path / "from-host.txt"
+    client_file.write_text("client to host")
+    host_file.write_text("host to client")
+    try:
+        pair(host, one)
+        pair(host, two)
+
+        one.send_files(host.cfg.device_id, [str(client_file)])
+        assert wait_for(lambda: (host_destination / client_file.name).exists())
+        assert (host_destination / client_file.name).read_text() == "client to host"
+        assert two.state.snapshot()["transfers"] == []
+
+        host.send_files(one.cfg.device_id, [str(host_file)])
+        assert wait_for(lambda: (one_destination / host_file.name).exists())
+        assert (one_destination / host_file.name).read_text() == "host to client"
+        assert two.state.snapshot()["transfers"] == []
+        assert not two_destination.exists()
+    finally:
+        host.stop()
+        one.stop()
+        two.stop()
+
 def test_client_cannot_connect_and_host_refuses_inbound_as_busy(star):
     host, one, _, three = star
     pair(host, one)

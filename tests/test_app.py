@@ -468,8 +468,10 @@ def test_the_right_code_pairs_both_machines(pair):
     assert wait_for(lambda: target.state.snapshot().get("session"))
     assert target.state.snapshot()["session"]["role"] == "client"
     assert connector.negotiated_version == 3
-    assert next(iter(connector._peers.values())).caps == {"heartbeat", "clipboard"}
-    assert next(iter(target._peers.values())).caps == {"heartbeat", "clipboard"}
+    assert next(iter(connector._peers.values())).caps == {
+        "heartbeat", "clipboard", "files"}
+    assert next(iter(target._peers.values())).caps == {
+        "heartbeat", "clipboard", "files"}
 
 
 def test_new_peers_authenticate_pair_ok_at_negotiated_v3(pair):

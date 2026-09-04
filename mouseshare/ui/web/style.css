@@ -207,6 +207,12 @@ input[type="text"]:focus { border-color: var(--accent); }
   display: block; color: var(--muted); font-size: 12px; margin-top: 8px;
 }
 
+.drop-zone { text-align: center; padding: 38px; border-style: dashed; cursor: pointer; }
+.drop-zone.active { border-color: var(--accent); background: var(--accent-soft); }
+.drop-zone strong { display: block; }
+.transfer progress { display: block; width: 100%; height: 7px; margin-top: 9px; accent-color: var(--accent); }
+.transfer .failure { color: var(--bad); }
+
 .manual { margin-top: 22px; }
 .manual summary {
   color: var(--muted); cursor: pointer; font-size: 13px;

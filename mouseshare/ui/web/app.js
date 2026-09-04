@@ -7,6 +7,7 @@
 
 let state = null;
 let dragging = null;
+let selectedFiles = [];
 
 const $ = (sel) => document.querySelector(sel);
 const $$ = (sel) => Array.from(document.querySelectorAll(sel));
@@ -35,14 +36,20 @@ function render(next) {
   $$('.tab').forEach((t) => t.classList.toggle('active', t.dataset.screen === screen));
 
   const banner = $('#banner');
-  banner.textContent = state.error || '';
-  banner.hidden = !state.error;
+  const latestTransfer = (state.transfers || []).slice().reverse().find(
+    (transfer) => ['done', 'failed'].includes(transfer.status)
+  );
+  const transferError = latestTransfer?.status === 'failed'
+    ? `File transfer failed${latestTransfer.error ? `: ${latestTransfer.error}` : ''}` : '';
+  banner.textContent = state.error || transferError;
+  banner.hidden = !banner.textContent;
 
   // A notice is worth saying but is not something going wrong, so it must
   // not look like a failure.
   const notice = $('#notice');
-  notice.textContent = state.notice || '';
-  notice.hidden = !state.notice;
+  const transferNotice = latestTransfer?.status === 'done' ? 'File transfer complete' : '';
+  notice.textContent = state.notice || transferNotice;
+  notice.hidden = !notice.textContent;
 
   $('#self-name').textContent = state.device.name;
   $('#self-port').textContent = 'port ' + state.device.port;
@@ -65,6 +72,7 @@ function render(next) {
     $('#escape-key').value = state.settings.escape_key;
   }
   $('#share-clipboard').checked = state.settings.share_clipboard;
+  $('#share-files').checked = state.settings.share_files;
   if (document.activeElement !== $('#name-input')) {
     $('#name-input').value = state.device.name;
   }
@@ -73,6 +81,40 @@ function render(next) {
   renderPairing();
   renderLayout();
   renderPaired();
+  renderTransfers();
+}
+
+function renderTransfers() {
+  const picker = $('#file-device');
+  const selected = picker.value;
+  picker.innerHTML = '';
+  for (const peer of state.peers.filter((p) => p.connected)) {
+    const option = el('option', '', peer.name);
+    option.value = peer.device_id;
+    picker.appendChild(option);
+  }
+  if ([...picker.options].some((o) => o.value === selected)) picker.value = selected;
+  $('#file-send').disabled = !selectedFiles.length || !picker.value;
+  const host = $('#transfers');
+  host.innerHTML = '';
+  for (const transfer of state.transfers || []) {
+    const card = el('div', 'card transfer');
+    const meta = el('div', 'meta');
+    meta.appendChild(el('strong', '', `${transfer.direction === 'send' ? 'To' : 'From'} ${transfer.peer_name}`));
+    meta.appendChild(el('span', '', `${transfer.files.length} file${transfer.files.length === 1 ? '' : 's'} · ${transfer.status}`));
+    const progress = el('progress');
+    progress.max = Math.max(transfer.bytes_total, 1);
+    progress.value = transfer.bytes_done;
+    meta.appendChild(progress);
+    if (transfer.error) meta.appendChild(el('span', 'failure', transfer.error));
+    card.appendChild(meta);
+    if (['offered', 'active'].includes(transfer.status)) {
+      const cancel = el('button', 'danger', 'Cancel');
+      cancel.onclick = () => api().cancel_transfer(transfer.id).then(render);
+      card.appendChild(cancel);
+    }
+    host.appendChild(card);
+  }
 }
 
 function renderPeers() {
@@ -315,6 +357,30 @@ function wire() {
     api().set_escape_key($('#escape-key').value).then(render);
   $('#share-clipboard').onchange = () =>
     api().set_share_clipboard($('#share-clipboard').checked).then(render);
+  $('#share-files').onchange = () =>
+    api().set_share_files($('#share-files').checked).then(render);
+  const drop = $('#file-drop');
+  const choose = (paths) => {
+    selectedFiles = paths.filter(Boolean);
+    $('#file-selection').textContent = selectedFiles.length
+      ? `${selectedFiles.length} file${selectedFiles.length === 1 ? '' : 's'} selected`
+      : 'No files selected';
+    renderTransfers();
+  };
+  drop.onclick = async () => choose(await api().pick_files());
+  drop.ondragover = (event) => { event.preventDefault(); drop.classList.add('active'); };
+  drop.ondragleave = () => drop.classList.remove('active');
+  drop.ondrop = (event) => {
+    event.preventDefault();
+    drop.classList.remove('active');
+    choose([...event.dataTransfer.files].map((file) => file.pywebviewFullPath));
+  };
+  $('#file-send').onclick = async () => {
+    const next = await api().send_files($('#file-device').value, selectedFiles);
+    selectedFiles = [];
+    $('#file-selection').textContent = 'No files selected';
+    render(next);
+  };
   $('#code-submit').onclick = submitCode;
 
   const boxes = $$('#code-entry input');

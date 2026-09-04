@@ -17,7 +17,9 @@ VERSION = 3
 MIN_VERSION = 2
 MAX_LINE = 64 * 1024
 CAPABILITIES = ["heartbeat"]
-OPTIONAL_TYPES = {"ping", "pong", "edge", "clip", "clip_chunk"}
+OPTIONAL_TYPES = {"ping", "pong", "edge", "clip", "clip_chunk",
+                  "xfer_offer", "xfer_accept", "xfer_reject", "xfer_chunk",
+                  "xfer_ack", "xfer_done", "xfer_cancel", "xfer_error"}
 
 
 class ProtocolError(Exception):
@@ -122,6 +124,39 @@ def pong(seq: int) -> dict:
 
 def edge(x: int, y: int) -> dict:
     return {"t": "edge", "x": x, "y": y}
+
+
+def xfer_offer(id: str, files: list[dict]) -> dict:
+    return {"t": "xfer_offer", "id": id, "files": files}
+
+
+def xfer_accept(id: str) -> dict:
+    return {"t": "xfer_accept", "id": id}
+
+
+def xfer_reject(id: str, reason: str) -> dict:
+    return {"t": "xfer_reject", "id": id, "reason": reason}
+
+
+def xfer_chunk(id: str, i: int, n: int, data: bytes) -> dict:
+    return {"t": "xfer_chunk", "id": id, "i": i, "n": n,
+            "data": base64.b64encode(data).decode("ascii")}
+
+
+def xfer_ack(id: str, i: int) -> dict:
+    return {"t": "xfer_ack", "id": id, "i": i}
+
+
+def xfer_done(id: str, file_index: int) -> dict:
+    return {"t": "xfer_done", "id": id, "file_index": file_index}
+
+
+def xfer_cancel(id: str) -> dict:
+    return {"t": "xfer_cancel", "id": id}
+
+
+def xfer_error(id: str, reason: str) -> dict:
+    return {"t": "xfer_error", "id": id, "reason": reason}
 
 
 def register_optional_type(kind: str) -> None:

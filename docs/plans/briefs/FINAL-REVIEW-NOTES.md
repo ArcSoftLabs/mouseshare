@@ -5,6 +5,7 @@
 2. `mouseshare/app.py` `_default_offset` / `_build_layout`: defaults consider only already-placed devices; saved offsets seeded first (M-B delta finding). Commit 4b559a4. Test `test_default_offsets_use_only_placed_devices` (its first version had a wrong `can_place` signature, fixed before commit).
 3. `tools/dragdrop/win_edge_drop.py`: ctypes argtypes for 64-bit handles (found by running on the PC). Commit ab6b1be.
 4. `pyproject.toml` / `.github/workflows/build.yml`: explicit ruff rule selection and version pin (H2). Commit 1ee4877.
+5. `tests/test_transfer.py` `test_one_mib_transfer_streams_with_bounded_sender_and_receiver_memory`: the peak bound is `512 KiB + 2 * io.DEFAULT_BUFFER_SIZE` (F1 rework 2). Python 3.14 on Windows opens files with a 128 KiB buffer (8 KiB on Linux 3.10) and the transfer holds two handles; Sol's flat 512 KiB failed on `py.exe` at ~675 KB. A hoarding-receiver probe still trips the new bound on both platforms. Also note: Sol lowered `ACK_EVERY` 8→4 in `transfer.py` for the memory bound without being asked; reviewed in the round-2 delta review and ratified (the F1 brief said "e.g. 8"; LAN throughput is encode-bound). Controller also added `or send.failed` to the chunk-loop guard in `_run_send` (round-2 delta finding: after a remote `xfer_error` the sender kept emitting up to ACK_EVERY-1 chunks).
 
 ## Known caveats carried in the plan doc
 - First outbound `pair_request` is encoded v3; a strict v2 decoder rejects it (P1 progress note). Live test against the Mac's v0.2.0 planned/performed — see LIVE-V2 notes.
