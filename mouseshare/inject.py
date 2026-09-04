@@ -10,12 +10,29 @@ Platform work lives behind `PynputBackend` so the registry -- the part
 that matters for safety -- is testable without a display.
 """
 import logging
+import sys
 import threading
 from typing import Set, Tuple
 
 Held = Tuple[str, str, str]
 
 log = logging.getLogger("mouseshare")
+
+
+def button_from_wire(name: str, platform: str = sys.platform) -> str:
+    """Translate portable side-button names to pynput's platform spelling."""
+    if platform.startswith("linux"):
+        return {"x1": "button8", "x2": "button9"}.get(name, name)
+    if platform == "win32":
+        return {"button8": "x1", "button9": "x2"}.get(name, name)
+    return name
+
+
+def button_to_wire(name: str, platform: str = sys.platform) -> str:
+    """Translate pynput's platform spelling to the portable wire name."""
+    if platform.startswith("linux"):
+        return {"button8": "x1", "button9": "x2"}.get(name, name)
+    return name
 
 
 class PynputBackend:
@@ -36,6 +53,7 @@ class PynputBackend:
         self._mouse.scroll(dx, dy)
 
     def button(self, name: str, pressed: bool) -> bool:
+        name = button_from_wire(name)
         btn = getattr(self._mouse_mod.Button, name, None)
         if btn is None:
             return False  # not on this platform, e.g. x1 on macOS

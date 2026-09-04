@@ -331,3 +331,4 @@ GUI launch via `open`); Windows runs via `py.exe`; Linux via WSLg.
 - [x] M5 — four-device loopback routing and recovery coverage.
 - [x] C1 — platform clipboard backends and availability factory.
 - [x] C2 — capability-gated clipboard synchronisation and relay.
+- [x] L1 — first-class X11 capture/injection, XDG paths, and explicit Wayland refusal.

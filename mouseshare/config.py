@@ -1,4 +1,4 @@
-"""Configuration and identity (~/.mouseshare/config.json).
+"""Configuration and identity (XDG on Linux, ~/.mouseshare elsewhere).
 
 This file now holds pairing tokens, so it is written atomically and kept
 private to the user. A corrupt file is replaced rather than propagated as
@@ -12,10 +12,16 @@ import sys
 import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Dict, Tuple
+from typing import Dict, Optional, Tuple
 
 DEFAULT_PORT = 39471
-DEFAULT_PATH = Path.home() / ".mouseshare" / "config.json"
+LEGACY_PATH = Path.home() / ".mouseshare" / "config.json"
+if sys.platform == "linux":
+    from . import linux
+
+    DEFAULT_PATH = linux.config_dir() / "config.json"
+else:
+    DEFAULT_PATH = LEGACY_PATH
 ESCAPE_KEYS = frozenset({"ctrl", "cmd", "alt", "shift"})
 
 
@@ -50,8 +56,8 @@ def _defaults() -> Config:
     return Config(device_id=uuid.uuid4().hex, name=socket.gethostname())
 
 
-def load(path: Path = DEFAULT_PATH) -> Config:
-    path = Path(path)
+def load(path: Optional[Path] = None) -> Config:
+    path = default_path() if path is None else Path(path)
     if not path.exists():
         return _defaults()
     try:
@@ -81,7 +87,15 @@ def load(path: Path = DEFAULT_PATH) -> Config:
     return cfg
 
 
-def load_or_create(path: Path = DEFAULT_PATH) -> Config:
+def default_path() -> Path:
+    if sys.platform == "linux":
+        from . import linux
+
+        return linux.config_dir() / "config.json"
+    return LEGACY_PATH
+
+
+def load_or_create(path: Optional[Path] = None) -> Config:
     """Load, and write the result straight back.
 
     A fresh install and a corrupt file both mint a new `device_id`. That id
@@ -89,7 +103,10 @@ def load_or_create(path: Path = DEFAULT_PATH) -> Config:
     it is not persisted immediately it changes on the next launch and
     silently breaks every pairing the user had made.
     """
-    cfg = load(path)
+    implicit = path is None
+    path = default_path() if implicit else Path(path)
+    legacy = LEGACY_PATH
+    cfg = load(legacy if implicit and not path.exists() and legacy.exists() else path)
     try:
         save(cfg, path)
     except OSError as exc:  # read-only home, full disk -- run anyway
@@ -99,9 +116,9 @@ def load_or_create(path: Path = DEFAULT_PATH) -> Config:
     return cfg
 
 
-def save(cfg: Config, path: Path = DEFAULT_PATH) -> None:
-    path = Path(path)
-    path.parent.mkdir(parents=True, exist_ok=True)
+def save(cfg: Config, path: Optional[Path] = None) -> None:
+    path = default_path() if path is None else Path(path)
+    path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
     raw = {
         "device_id": cfg.device_id,
         "name": cfg.name,

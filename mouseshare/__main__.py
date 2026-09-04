@@ -65,13 +65,15 @@ def _probe_backend() -> str:
 
     That import is what fails when PyInstaller misses the platform module,
     and unlike `guilib.initialize()` it needs no display and no guessing at
-    an internal API.
+    an internal API. Linux's GTK backend requires the system packages
+    python3-gi, gir1.2-webkit2-4.1 (or 4.0), and gir1.2-gtk-3.0.
     """
     import importlib
 
     name = {
         "win32": "webview.platforms.edgechromium",
         "darwin": "webview.platforms.cocoa",
+        "linux": "webview.platforms.gtk",
     }.get(sys.platform)
     if name is None:
         return f"no backend expected on {sys.platform}"
@@ -90,12 +92,17 @@ def _probe_zeroconf() -> str:
 def _probe_monitors() -> str:
     from . import config, monitors
 
-    found = monitors.enumerate_local(config.load(config.DEFAULT_PATH).device_id)
+    found = monitors.enumerate_local(config.load(config.default_path()).device_id)
     return ", ".join(f"{m.w}x{m.h}+{m.x}+{m.y}" for m in found)
 
 
 def _probe_pynput() -> str:
-    from pynput import keyboard, mouse
+    try:
+        from pynput import keyboard, mouse
+    except ImportError as exc:
+        if sys.platform.startswith("linux") and not os.environ.get("DISPLAY"):
+            return f"unavailable without DISPLAY: {exc}"
+        raise
 
     # A CI runner has no input session, so a denial here is expected and is
     # not what this probe is for -- it is checking that the platform
@@ -112,15 +119,21 @@ def log_path() -> str:
     process as responsible for the app, and the accessibility grants that
     let it inject anything at all stop applying.
     """
-    base = (
-        os.path.expanduser("~/Library/Logs/MouseShare")
-        if sys.platform == "darwin"
-        else os.path.join(
-            os.environ.get("LOCALAPPDATA") or os.path.expanduser("~"), "MouseShare"
+    if sys.platform.startswith("linux"):
+        from . import linux
+
+        path = linux.log_path()
+    else:
+        base = (
+            os.path.expanduser("~/Library/Logs/MouseShare")
+            if sys.platform == "darwin"
+            else os.path.join(
+                os.environ.get("LOCALAPPDATA") or os.path.expanduser("~"), "MouseShare"
+            )
         )
-    )
-    os.makedirs(base, exist_ok=True)
-    return os.path.join(base, "debug.log")
+        path = os.path.join(base, "debug.log")
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    return str(path)
 
 
 def main() -> int:
@@ -187,7 +200,10 @@ def main() -> int:
             app.state.set(error=f"MouseShare could not start: {exc}")
 
     try:
-        webview.start(boot, debug=args.debug)
+        kwargs = {"debug": args.debug}
+        if sys.platform.startswith("linux"):
+            kwargs["gui"] = "gtk"
+        webview.start(boot, **kwargs)
     finally:
         # Closing the window quits, so this is the one shutdown path, and
         # it must release input before anything else can go wrong.

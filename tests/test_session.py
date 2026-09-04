@@ -95,6 +95,26 @@ def test_touching_the_shared_edge_hands_the_cursor_to_the_peer():
     assert send.sent[-1] == {"t": "enter", "x": 0, "y": 500}
 
 
+def test_failed_capture_grab_returns_local_without_stopping_listeners():
+    host, capture, _, send = a_host()
+    changes = []
+    host._on_remote_change = changes.append
+    capture.listeners_running = True
+
+    def fail(*_args):
+        raise RuntimeError("already grabbed")
+
+    capture.start_remote = fail
+    host.on_move(1919, 500)
+
+    assert host.remote is False
+    assert capture.suppressing is False
+    assert capture.listeners_running is True
+    assert capture.stops == 1
+    assert changes == [True, False]
+    assert send.sent == []
+
+
 def test_the_cursor_is_parked_in_the_middle_of_the_screen_it_left():
     """Parked on the edge it just touched, the OS clamps every further
     move: pushing right yields no movement at all, and near a step in the

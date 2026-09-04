@@ -97,7 +97,18 @@ class HostSession:
         self._peer_pos = (px, py)
         park = self._park(x, y)
         self._return_anchor = park[0]
-        self.capture.start_remote(*park)
+        try:
+            self.capture.start_remote(*park)
+        except RuntimeError as exc:
+            log.warning("input capture grab failed: %s", type(exc).__name__)
+            try:
+                self.capture.stop_remote()
+            except RuntimeError as cleanup_exc:
+                log.warning("input capture cleanup failed: %s",
+                            type(cleanup_exc).__name__)
+            self.remote = False
+            self._on_remote_change(False)
+            return
         log.info("cursor crossed to %s at (%d, %d)", self.peer_id, px, py)
         self._forward(protocol.enter(px, py))
 

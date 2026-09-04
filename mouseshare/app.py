@@ -12,7 +12,7 @@ import logging
 import threading
 import time
 from dataclasses import dataclass, field
-from typing import Any, Optional
+from typing import Any, Optional, Union
 
 from . import config, discovery, monitors, pairing, protocol, session
 from .capture import InputCapture
@@ -71,9 +71,9 @@ class App:
                     "leave", "ping", "pong", "edge", "clip", "clip_chunk"},
     }
 
-    def __init__(self, deliver, cfg_path=config.DEFAULT_PATH) -> None:
+    def __init__(self, deliver, cfg_path=None) -> None:
         self.cfg = config.load_or_create(cfg_path)
-        self._cfg_path = cfg_path
+        self._cfg_path = config.default_path() if cfg_path is None else cfg_path
         self._lock = threading.RLock()
         self.monitors = monitors.enumerate_local(self.cfg.device_id)
 
@@ -345,6 +345,20 @@ class App:
         telling them which switch to flip.
         """
         import sys
+        if sys.platform.startswith("linux"):
+            from . import linux
+
+            kind = linux.session_type()
+            if kind == "x11":
+                return {"needed": False, "items": []}
+            why = ("MouseShare needs an X11 session on Linux "
+                   "(log out and choose 'Ubuntu on Xorg')"
+                   if kind == "wayland" else
+                   "MouseShare needs a graphical X11 display on Linux")
+            return {"needed": True, "items": [{
+                "key": "session", "label": "X11 session", "why": why,
+                "granted": False,
+            }]}
         if sys.platform != "darwin":
             return {"needed": False, "items": []}
         try:
@@ -366,10 +380,17 @@ class App:
              "granted": input_monitoring},
         ]}
 
-    def open_permissions(self, key: str) -> bool:
+    def open_permissions(self, key: str) -> Union[bool, str]:
         """Open the System Settings pane for one permission."""
         import subprocess
         import sys
+        if sys.platform.startswith("linux"):
+            from . import linux
+
+            if linux.session_type() == "wayland":
+                return ("MouseShare needs an X11 session on Linux "
+                        "(log out and choose 'Ubuntu on Xorg')")
+            return "MouseShare needs a graphical X11 display on Linux"
         pane = {"accessibility": "Privacy_Accessibility",
                 "input": "Privacy_ListenEvent"}.get(key)
         if sys.platform != "darwin" or pane is None:

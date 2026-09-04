@@ -28,12 +28,17 @@ Platform mechanics, verified against the pynput 1.8.2 sources:
 - **macOS.** `_handler` dispatches callbacks *before* consulting
   `darwin_intercept`, so the normal handlers keep firing while suppressing.
 
-Either way movement is measured from the previous event's position, and
-the cursor is only warped back to the anchor once it has wandered near
-the screen edge. See `_moved`.
+- **Linux/X11.** Listeners never use pynput's all-or-nothing `suppress`;
+  remote mode takes explicit pointer and keyboard grabs. Pointer motion is
+  measured from the anchor and a worker thread warps back after callbacks.
+
+Movement is measured from the anchor. Windows only needs a corrective warp
+for a stale event, while X11 needs one after each physical move. See `_moved`.
 """
 import ctypes
+import importlib
 import logging
+import queue
 import sys
 import threading
 import time
@@ -142,11 +147,26 @@ class InputCapture:
         self._consume_current = False
         self._watchdog_stop = threading.Event()
         self._watchdog = None
+        self._linux_grab = None
+        self._linux_warps = None
+        self._linux_warp_thread = None
 
     # -- lifecycle -----------------------------------------------------------
 
     def start(self) -> None:
-        from pynput import keyboard, mouse
+        if sys.platform.startswith("linux"):
+            from . import linux
+
+            kind = linux.session_type()
+            if kind != "x11":
+                reason = "Wayland is unsupported" if kind == "wayland" else "no display"
+                raise RuntimeError(f"MouseShare needs an X11 session on Linux ({reason})")
+            mouse = importlib.import_module("pynput.mouse._xorg")
+            keyboard = importlib.import_module("pynput.keyboard._xorg")
+            self._linux_grab = linux.XGrab()
+            self._start_linux_warper()
+        else:
+            from pynput import keyboard, mouse
 
         self._controller = mouse.Controller()
         self._key_enum = keyboard.Key
@@ -172,20 +192,27 @@ class InputCapture:
         self._limit = int(limit)
         self._escape = EscapeDetector(self._escape_key, ESCAPE_WINDOW)
         self._controller.position = self._anchor
+        if sys.platform.startswith("linux"):
+            self._linux_grab.grab()
         self.suppressing = True
 
     def stop_remote(self) -> None:
         self.suppressing = False
+        if self._linux_grab is not None:
+            try:
+                self._linux_grab.ungrab()
+            except Exception as exc:  # noqa: BLE001 - still stop listeners
+                log.warning("could not release X11 input grab: %s", type(exc).__name__)
 
     def _moved(self, x: int, y: int) -> None:
         """Report one event's movement, measured from the anchor.
 
-        A suppressed event never reaches the desktop, so the real cursor
-        stays parked and each event carries the anchor plus its own
-        movement. Nothing needs putting back afterwards -- and it must
-        not be, because a warp is a syscall inside the hook callback that
-        returns as another hook event, and Windows stops calling a hook
-        that cannot keep up at a thousand reports a second.
+        Windows suppression keeps the real cursor parked. Under an X11
+        grab it moves, so every physical event queues a warp outside the
+        callback; the resulting anchor event is ignored. A warp must not
+        happen inside the callback because it returns as another event,
+        and Windows stops calling a hook that cannot keep up at a thousand
+        reports a second.
         """
         dx, dy = x - self._anchor[0], y - self._anchor[1]
         if max(abs(dx), abs(dy)) > self._limit:
@@ -193,17 +220,67 @@ class InputCapture:
             # suppression began still carries the pre-park position, and
             # Windows does not mark our park as injected, so size is what
             # tells them apart. Put the cursor back instead of reporting.
-            self._controller.position = self._anchor
+            if sys.platform.startswith("linux"):
+                self._queue_linux_warp()
+            else:
+                self._controller.position = self._anchor
         elif (dx, dy) != (0, 0):
             self._on_delta(dx, dy)
+            if sys.platform.startswith("linux"):
+                self._queue_linux_warp()
 
     def stop(self) -> None:
         self.suppressing = False
+        if self._linux_grab is not None:
+            try:
+                self._linux_grab.ungrab()
+            except Exception as exc:  # noqa: BLE001 - still stop listeners
+                log.warning("could not release X11 input grab: %s", type(exc).__name__)
         self._watchdog_stop.set()
+        if self._linux_warps is not None:
+            # The queue holds one slot; a dead worker must not hang shutdown.
+            while True:
+                try:
+                    self._linux_warps.get_nowait()
+                except queue.Empty:
+                    break
+            try:
+                self._linux_warps.put_nowait(None)
+            except queue.Full:
+                pass
         for listener in (self._mouse_listener, self._key_listener):
             if listener is not None:
                 listener.stop()
         self._mouse_listener = self._key_listener = None
+
+    def _start_linux_warper(self) -> None:
+        self._linux_warps = queue.Queue(maxsize=1)
+
+        def warp():
+            from .linux import warp_pointer
+
+            while True:
+                point = self._linux_warps.get()
+                if point is None:
+                    return
+                try:
+                    warp_pointer(self._linux_grab, point)
+                except Exception as exc:  # noqa: BLE001
+                    # A dead X connection must not kill the worker; the
+                    # watchdog and stop() handle the rest.
+                    log.warning("X11 warp failed: %s", type(exc).__name__)
+
+        self._linux_warp_thread = threading.Thread(
+            target=warp, name="mouseshare-x11-warp", daemon=True
+        )
+        self._linux_warp_thread.start()
+
+    def _queue_linux_warp(self) -> None:
+        if self._linux_warps is not None:
+            try:
+                self._linux_warps.put_nowait(self._anchor)
+            except queue.Full:
+                pass
 
     def _start_watchdog(self, interval: float = 0.5) -> None:
         if self._watchdog is not None and self._watchdog.is_alive():
@@ -244,7 +321,7 @@ class InputCapture:
     def _start_mouse(self, mouse) -> None:
         def handle_move(x, y, *_):
             if self.suppressing:
-                # macOS path: callbacks fire even for suppressed events.
+                # macOS and X11 callbacks fire even for suppressed events.
                 # Untested as a host. This assumes the intercept leaves
                 # the real cursor parked, as suppression does on Windows;
                 # if it does not, the offsets accumulate and the peer
@@ -255,7 +332,9 @@ class InputCapture:
 
         def handle_click(x, y, button, pressed, *_):
             if self.suppressing:
-                self._on_click(button.name, pressed)
+                from .inject import button_to_wire
+
+                self._on_click(button_to_wire(button.name), pressed)
 
         def handle_scroll(x, y, dx, dy, *_):
             if self.suppressing:
@@ -288,6 +367,10 @@ class InputCapture:
             kwargs["win32_event_filter"] = win32_event_filter
         elif sys.platform == "darwin":
             kwargs["darwin_intercept"] = self._darwin_intercept
+        elif sys.platform.startswith("linux"):
+            # X11 suppression is toggled with XGrab in start_remote; a
+            # pynput suppress=True listener would grab for its whole life.
+            kwargs = {}
 
         self._mouse_listener = mouse.Listener(
             on_move=handle_move,
@@ -346,6 +429,10 @@ class InputCapture:
             kwargs["win32_event_filter"] = win32_event_filter
         elif sys.platform == "darwin":
             kwargs["darwin_intercept"] = self._darwin_keyboard_intercept
+        elif sys.platform.startswith("linux"):
+            # Callbacks remain live under XGrab and share emit(), including
+            # the two-tap escape detector.
+            kwargs = {}
 
         self._key_listener = keyboard.Listener(
             on_press=handle_press, on_release=handle_release, **kwargs
