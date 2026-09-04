@@ -59,7 +59,23 @@ shell32 = ctypes.windll.shell32
 ole32 = ctypes.windll.ole32
 kernel32 = ctypes.windll.kernel32
 
+user32.CreateWindowExW.argtypes = [
+    wintypes.DWORD, wintypes.LPCWSTR, wintypes.LPCWSTR, wintypes.DWORD,
+    ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_int,
+    wintypes.HWND, wintypes.HMENU, wintypes.HINSTANCE, wintypes.LPVOID,
+]
 user32.CreateWindowExW.restype = wintypes.HWND
+user32.DefWindowProcW.argtypes = [wintypes.HWND, wintypes.UINT, wintypes.WPARAM, wintypes.LPARAM]
+user32.SetLayeredWindowAttributes.argtypes = [wintypes.HWND, wintypes.COLORREF, wintypes.BYTE, wintypes.DWORD]
+user32.SetLayeredWindowAttributes.restype = wintypes.BOOL
+user32.DestroyWindow.argtypes = [wintypes.HWND]
+user32.DestroyWindow.restype = wintypes.BOOL
+user32.SetCursorPos.argtypes = [ctypes.c_int, ctypes.c_int]
+user32.SetCursorPos.restype = wintypes.BOOL
+shell32.DragAcceptFiles.argtypes = [wintypes.HWND, wintypes.BOOL]
+shell32.DragAcceptFiles.restype = None
+shell32.DragFinish.argtypes = [wintypes.HANDLE]
+shell32.DragFinish.restype = None
 user32.DefWindowProcW.restype = ctypes.c_ssize_t
 user32.GetMessageW.restype = wintypes.BOOL
 kernel32.GetModuleHandleW.restype = wintypes.HMODULE
