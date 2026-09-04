@@ -170,6 +170,29 @@ def test_protocol_version_cannot_be_downgraded_after_the_first_frame(tmp_path):
         victim.stop()
 
 
+def test_responder_rejects_v2_auth_after_negotiating_v3(victim):
+    raw = socket.create_connection(("127.0.0.1", victim._server.port))
+    raw.settimeout(2.0)
+    stream = raw.makefile("rb")
+    try:
+        raw.sendall(
+            b'{"t":"pair_request","device_id":"attacker","name":"Attacker",'
+            b'"max_v":3,"v":2}\n'
+        )
+        challenge = json.loads(stream.readline())
+        assert challenge["t"] == "pair_challenge"
+        assert challenge["v"] == 3
+
+        raw.sendall(
+            b'{"t":"auth","device_id":"attacker","hmac":"00","v":2}\n'
+        )
+        assert stream.readline() == b""
+        assert wait_for(lambda: not victim._server.has_connection())
+        assert victim.state.snapshot().get("session") is None
+    finally:
+        raw.close()
+
+
 def test_inbound_duplicate_identity_cannot_disturb_live_session(victim):
     """An inbound pair_request cannot replace the live owner of its ID."""
     class LiveLink:

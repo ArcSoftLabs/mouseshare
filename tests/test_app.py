@@ -472,6 +472,25 @@ def test_the_right_code_pairs_both_machines(pair):
     assert next(iter(target._peers.values())).caps == {"heartbeat", "clipboard"}
 
 
+def test_new_peers_authenticate_pair_ok_at_negotiated_v3(pair):
+    connector, target = pair
+    sent = []
+    original_send = target._server.send
+
+    def record_send(msg):
+        sent.append(msg.copy())
+        original_send(msg)
+
+    target._server.send = record_send
+    connector.connect_manually("127.0.0.1", target._server.port)
+    pair_up(connector, target)
+
+    assert wait_for(lambda: connector.state.snapshot().get("session"))
+    pair_ok = next(msg for msg in sent if msg.get("t") == "pair_ok")
+    assert connector.negotiated_version == target.negotiated_version == 3
+    assert pair_ok["hmac"]
+
+
 def test_client_sends_edge_to_host_through_its_outbox(pair):
     connector, target = pair
     connector.connect_manually("127.0.0.1", target._server.port)
@@ -541,10 +560,16 @@ def test_v2_speaking_peer_pairs_and_receives_cursor_movement(tmp_path):
         conn, _ = listener.accept()
         stream = conn.makefile("rb")
         received.append(json.loads(stream.readline()))
+        if received[-1]["v"] != 2:
+            conn.close()
+            return
         send_v2(conn, {
             "t": "pair_challenge", "nonce": "ab" * 16, "device_id": peer_id,
         })
         received.append(json.loads(stream.readline()))
+        if received[-1]["v"] != 2:
+            conn.close()
+            return
         send_v2(conn, {
             "t": "pair_ok", "name": "Old peer",
             "monitors": monitors.to_wire([
@@ -552,7 +577,13 @@ def test_v2_speaking_peer_pairs_and_receives_cursor_movement(tmp_path):
             ]),
         })
         received.append(json.loads(stream.readline()))
+        if received[-1]["v"] != 2:
+            conn.close()
+            return
         received.append(json.loads(stream.readline()))
+        if received[-1]["v"] != 2:
+            conn.close()
+            return
         moved.set()
         conn.close()
 
@@ -566,9 +597,64 @@ def test_v2_speaking_peer_pairs_and_receives_cursor_movement(tmp_path):
             {"t": "pos", "x": 22, "y": 33})
         assert moved.wait(2.0)
         assert instance.negotiated_version == 2
+        assert received[0]["v"] == 2
+        assert received[0]["max_v"] == 3
+        assert all(msg["v"] == 2 for msg in received)
         assert received[-1]["t"] == "pos"
         assert received[-1]["v"] == 2
         assert all("caps" not in msg for msg in received)
+    finally:
+        instance.stop()
+        listener.close()
+
+
+def test_strict_v2_peer_pairs_over_code(tmp_path):
+    peer_id = "strict-v2-peer"
+    listener = socket.socket()
+    listener.bind(("127.0.0.1", 0))
+    listener.listen(1)
+    received = []
+    paired = threading.Event()
+
+    def send_v2(conn, msg):
+        conn.sendall(
+            json.dumps({**msg, "v": 2}, separators=(",", ":")).encode() + b"\n"
+        )
+
+    def peer():
+        conn, _ = listener.accept()
+        stream = conn.makefile("rb")
+        first = json.loads(stream.readline())
+        received.append(first)
+        if first["v"] != 2:
+            conn.close()
+            return
+        send_v2(conn, {
+            "t": "pair_challenge", "nonce": "ab" * 16, "device_id": peer_id,
+        })
+        received.append(json.loads(stream.readline()))
+        if received[-1]["v"] != 2:
+            conn.close()
+            return
+        send_v2(conn, {
+            "t": "pair_ok", "name": "Strict old peer", "monitors": [],
+            "token": "ef" * 32,
+        })
+        paired.set()
+        time.sleep(0.2)
+        conn.close()
+
+    threading.Thread(target=peer, daemon=True).start()
+    instance = make_app(tmp_path, "host", 0)
+    try:
+        instance.connect_manually("127.0.0.1", listener.getsockname()[1])
+        assert wait_for(lambda: any(p.nonce for p in instance._handshakes))
+        instance.submit_code("123456")
+        assert paired.wait(2.0)
+        assert wait_for(lambda: instance.state.snapshot().get("session"))
+        assert instance.negotiated_version == 2
+        assert received[0]["max_v"] == 3
+        assert all(msg["v"] == 2 for msg in received)
     finally:
         instance.stop()
         listener.close()

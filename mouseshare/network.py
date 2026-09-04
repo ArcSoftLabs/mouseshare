@@ -23,7 +23,8 @@ INBOUND_QUEUE_SIZE = 64
 class _Link:
     """One connection plus the guarantee that its disconnect fires once."""
 
-    def __init__(self, sock: socket.socket, on_disconnect: Optional[DisconnectHandler]):
+    def __init__(self, sock: socket.socket, on_disconnect: Optional[DisconnectHandler],
+                 responder: bool = False):
         self.sock = sock
         self._on_disconnect = on_disconnect
         self._lock = threading.Lock()
@@ -32,6 +33,7 @@ class _Link:
         # interleave and the peer drops a stream mid-session.
         self._send_lock = threading.Lock()
         self._closed = False
+        self._responder = responder
         self.peer_version: Optional[int] = None
         self._inbound = queue.Queue(maxsize=INBOUND_QUEUE_SIZE)
         self._worker_stop = threading.Event()
@@ -159,7 +161,14 @@ def _read_loop(link: _Link, on_message: MessageHandler) -> None:
         try:
             for msg in buf.feed(data):
                 if link.peer_version is None:
-                    link.peer_version = msg["v"]
+                    advertised = (msg.get("max_v") or msg["v"]
+                                  if link._responder
+                                  and msg.get("t") == "pair_request" else msg["v"])
+                    if (not isinstance(advertised, int)
+                            or isinstance(advertised, bool)
+                            or advertised < protocol.MIN_VERSION):
+                        raise protocol.ProtocolError("invalid maximum version")
+                    link.peer_version = min(protocol.VERSION, advertised)
                 elif msg["v"] != link.peer_version:
                     raise protocol.ProtocolError("protocol version changed mid-stream")
                 if not link.enqueue(msg):
@@ -207,7 +216,7 @@ class MessageServer:
             with self._lock:
                 busy = self._link is not None and not self._link.closed
                 if not busy:
-                    self._link = _Link(conn, self._fire_disconnect)
+                    self._link = _Link(conn, self._fire_disconnect, responder=True)
                     link = self._link
             if busy:
                 try:
@@ -288,12 +297,14 @@ class MessageClient:
     def __init__(self, host: str, port: int):
         self._addr = (host, port)
         self._link: Optional[_Link] = None
+        self._first_send = True
 
     def connect(self, timeout: float = 10.0) -> None:
         sock = socket.create_connection(self._addr, timeout=timeout)
         sock.settimeout(None)
         sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
         self._link = _Link(sock, None)
+        self._first_send = True
 
     def start_reader(
         self,
@@ -320,8 +331,13 @@ class MessageClient:
             return
         try:
             with self._link._send_lock:
-                version = self._link.peer_version or protocol.VERSION
+                first_request = self._first_send and msg.get("t") == "pair_request"
+                if first_request:
+                    msg = {**msg, "max_v": protocol.VERSION}
+                version = (protocol.MIN_VERSION if first_request else
+                           self._link.peer_version or protocol.VERSION)
                 self._link.sock.sendall(protocol.encode(msg, version=version))
+                self._first_send = False
         except OSError:
             self._link.close("error")
 

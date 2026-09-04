@@ -2,6 +2,8 @@ import socket
 import threading
 import time
 
+import pytest
+
 from mouseshare import protocol as p
 from mouseshare.network import MessageClient, MessageServer
 
@@ -31,6 +33,52 @@ def test_client_sends_message_to_server_over_loopback():
         client.close()
     finally:
         server.stop()
+
+
+def test_client_first_frame_advertises_v3_in_a_v2_envelope():
+    listener = socket.socket()
+    listener.bind(("127.0.0.1", 0))
+    listener.listen(1)
+    client = MessageClient("127.0.0.1", listener.getsockname()[1])
+    client.connect()
+    conn, _ = listener.accept()
+    conn.settimeout(2.0)
+    try:
+        client.send(p.pair_request("abc", "laptop"))
+        first = p.decode(conn.makefile("rb").readline())
+        assert first["v"] == 2
+        assert first["max_v"] == 3
+    finally:
+        client.close()
+        conn.close()
+        listener.close()
+
+
+@pytest.mark.parametrize("reply_version", [2, 3])
+def test_client_uses_responder_version_after_first_reply(reply_version):
+    listener = socket.socket()
+    listener.bind(("127.0.0.1", 0))
+    listener.listen(1)
+    received = []
+    reply_seen = threading.Event()
+    client = MessageClient("127.0.0.1", listener.getsockname()[1])
+    client.connect()
+    conn, _ = listener.accept()
+    stream = conn.makefile("rb")
+    client.start_reader(lambda msg: reply_seen.set())
+    try:
+        client.send(p.pair_request("abc", "laptop"))
+        received.append(p.decode(stream.readline()))
+        conn.sendall(p.encode(p.pair_challenge("nonce", "peer"), reply_version))
+        assert reply_seen.wait(2.0)
+        client.send(p.auth("abc", "proof"))
+        received.append(p.decode(stream.readline()))
+        assert received[1]["v"] == reply_version
+        assert "max_v" not in received[1]
+    finally:
+        client.close()
+        conn.close()
+        listener.close()
 
 
 def test_server_sends_message_to_client():
@@ -64,6 +112,25 @@ def test_link_remembers_first_peer_version_and_replies_with_it():
         received.append(p.decode(reply))
         assert server.peer_version == 2
         assert received == [{"t": "leave", "v": 2}]
+    finally:
+        raw.close()
+        server.stop()
+
+
+def test_server_negotiates_advertised_max_version_and_replies_with_it():
+    received = []
+    server = MessageServer("127.0.0.1", 0, lambda m: server.send(p.leave()))
+    server.start()
+    raw = socket.create_connection(("127.0.0.1", server.port))
+    raw.settimeout(2.0)
+    try:
+        raw.sendall(
+            b'{"t":"pair_request","device_id":"new","name":"new",'
+            b'"max_v":3,"v":2}\n'
+        )
+        received.append(p.decode(raw.recv(4096)))
+        assert server.peer_version == 3
+        assert received == [{"t": "leave", "v": 3}]
     finally:
         raw.close()
         server.stop()

@@ -320,6 +320,8 @@ GUI launch via `open`); Windows runs via `py.exe`; Linux via WSLg.
   Interop with a real v2 peer therefore requires that peer to tolerate inbound `v:3`.
 - [x] P2 — client send path and off-reader-thread message handling.
 - [x] P3 — mutual authentication verifies the target's `pair_ok` response.
+- [x] P4 — first-frame version negotiation works with strict v2 peers.
+  Connectors send `pair_request` as v2 with `max_v:3`; responders pin the advertised maximum and connectors pin the reply version.
 - [x] A1 — local escape gesture, release re-warp, and listener-death recovery.
 - [x] M1 — multi-link host transport and explicit busy/duplicate/full refusal.
 - [x] M2 — per-link app handshake/session state and selective teardown.

@@ -466,12 +466,19 @@ class App:
     def _on_message(self, peer: _Peer, msg: dict) -> None:
         with self._lock:
             version = msg.get("v")
+            kind = msg.get("t")
             if peer.version is None:
-                peer.version = min(protocol.VERSION, version)
+                advertised = (msg.get("max_v") or version
+                              if peer.role == "client" and kind == "pair_request"
+                              else version)
+                if (not isinstance(advertised, int)
+                        or isinstance(advertised, bool)
+                        or advertised < protocol.MIN_VERSION):
+                    raise protocol.ProtocolError("invalid maximum version")
+                peer.version = min(protocol.VERSION, advertised)
             elif version != peer.version:
                 raise protocol.ProtocolError("protocol version changed mid-stream")
             peer.last_received = time.monotonic()
-            kind = msg.get("t")
             # The phase belongs to this peer's socket, not to the app. An
             # unauthenticated inbound socket must not be able to spend an
             # outbound peer's legitimate permission to send pair_ok.
